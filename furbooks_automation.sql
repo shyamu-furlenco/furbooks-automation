@@ -1,31 +1,4 @@
--- ============================================================================
--- REVENUE MOVEMENT ANALYSIS: Parameterized (defaults: Oct 2025 vs Nov 2025)
--- Purpose: Explain monthly revenue changes with full audit trail
--- Owner: Analytics Team
--- Last Updated: 2026-03-16
--- ============================================================================
--- SECTION 0: CONFIGURATION  (Databricks Parameterized Query)
--- Set :month1_start and :month2_start via the widget bar (format: YYYY-MM-01).
--- All other dates and labels are derived automatically using ADD_MONTHS().
--- ============================================================================
--- doc link: https://docs.google.com/document/d/1FBKClYSvw_zk7zeS-sgSthQxOo7qpeN73-vXljkP6t0/edit?usp=sharing
 
-
--- Parameters: :month1_start and :month2_start (e.g., '2025-10-01', '2025-11-01')
-
--- ============================================================================
--- SECTION 1: BASE REVENUE DATA
---
--- TIMEZONE POLICY (Fix 5):
---   - start_date, end_date, to_be_recognised_on: DATE (IST-aligned, no conversion).
---   - recognised_at, created_at, updated_at: UTC TIMESTAMP.
---     Always convert: DATE(<col> + INTERVAL '330 minutes').
---   - Exception: penalty scopes by recognised_at (UTC→IST) — no billing start_date.
--- ============================================================================
-
--- Important Notes: Currently, Swap In Items are not coming in fb_automation. And swap outs are missing. This could be one of the reasons why the revenue is not matching
-
--- Unified entity lookup: ITEMs + ATTACHMENTs, excluding CANCELLED rows
 with sms_entity AS (
     SELECT id, 'ITEM' AS entity_type, user_id, user_details_displayId
     FROM furlenco_silver.order_management_systems_evolve.items
@@ -63,13 +36,14 @@ with sms_entity AS (
         rr.state,
     DATE(rr.start_date)                                      AS start_date,
     DATE(rr.end_date)                                        AS end_date,
-    CAST(rrs.monetary_components_taxableAmount AS DOUBLE)/ROUND(DATEDIFF(DAY, rrs.start_date, rrs.end_date)/30.45)                    AS taxable_amount,
+    CAST(rrs.monetary_components_taxableAmount AS DOUBLE)/ROUND(DATEDIFF(DAY, rrs.start_date, rrs.end_date)/30.45)                    AS taxable_amount1,
     CAST(rrs.monetary_components_postTaxAmount AS DOUBLE)/ROUND(DATEDIFF(DAY, rrs.start_date, rrs.end_date)/30.45)                     AS post_tax_amount,
     ROUND(DATEDIFF(DAY, rrs.start_date, rrs.end_date)/30.45) AS tenure,
     DATE(rr.to_be_recognised_on)                             AS to_be_recognised_on,
     DATE(rr.recognised_at  + INTERVAL '330 minutes')         AS recognised_at,
     DATE(rr.created_at     + INTERVAL '330 minutes')         AS created_at,
     rr.external_reference_type,
+    rr.monetary_components_taxableAmount as taxable_amount,
     rr.external_reference_id,
     rr.revenue_recognition_schedule_id,
     sms_entity.user_id,
@@ -124,27 +98,36 @@ SELECT
 -- SECTION 3: SHARED BASE CTEs
 -- ============================================================================
 
--- Invoice-schedule grain used for plan-transition and accrual-change detection.
--- Excludes INVALIDATED/CANCELLED/PENDING and SETTLEMENT external references.
+-- Revenue-recognition-schedule grain used for plan-transition and accrual-change detection.
+-- Sourced from revenue_recognitions (aligned with furbooks_revenue) joined to
+-- revenue_recognition_schedules for schedule-level tenure and amounts.
+-- QUALIFY deduplicates to one row per (entity, schedule) — earliest recognition per schedule.
+-- Secondary sort on created_at in tenure_windowed resolves ties when two schedules share a start_date.
         , tenure_base AS (
 SELECT
-    revenue_recognition_type,
-    accountable_entity_id,
-    accountable_entity_type,
-    start_date,
-    end_date,
-    (CAST(monetary_components_taxableAmount AS DOUBLE) / NULLIF(number_of_invoice_cycles, 0)) AS taxableAmount,
-    number_of_invoice_cycles                                                   AS tenure,
-    state,
-    external_reference_type,
-    (created_at + INTERVAL '330 minutes')                                      AS created_at,
-    monetary_components
-FROM furlenco_silver.furbooks_evolve.invoice_schedules
-WHERE vertical = 'FURLENCO_RENTAL'
-  AND state NOT IN ('INVALIDATED', 'CANCELLED', 'PENDING')
-  AND created_at >= '2024-06-01'
-  AND accountable_entity_type IN ('ITEM', 'ATTACHMENT')
-  AND external_reference_type <> 'SETTLEMENT'
+    rr.recognition_type                                                        AS revenue_recognition_type,
+    rr.accountable_entity_id,
+    rr.accountable_entity_type,
+    DATE(rrs.start_date)                                                       AS start_date,
+    DATE(rrs.end_date)                                                         AS end_date,
+    CAST(rrs.monetary_components_taxableAmount AS DOUBLE)
+    / NULLIF(ROUND(DATEDIFF(DAY, rrs.start_date, rrs.end_date) / 30.45), 0) AS taxableAmount,
+    ROUND(DATEDIFF(DAY, rrs.start_date, rrs.end_date) / 30.45)                AS tenure,
+    rr.external_reference_type,
+    DATE(rr.created_at + INTERVAL '330 minutes')                               AS created_at,
+    rrs.monetary_components
+FROM furlenco_silver.furbooks_evolve.revenue_recognitions rr
+    LEFT JOIN furlenco_silver.furbooks_evolve.revenue_recognition_schedules rrs
+ON rrs.id = rr.revenue_recognition_schedule_id
+WHERE rr.vertical = 'FURLENCO_RENTAL'
+  AND rr.state NOT IN ('CANCELLED', 'INVALIDATED')
+  AND rr.accountable_entity_type IN ('ITEM', 'ATTACHMENT')
+  AND rr.external_reference_type <> 'SETTLEMENT'
+  AND rr.created_at >= '2024-06-01'
+    QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY rr.accountable_entity_id, rr.accountable_entity_type, rr.revenue_recognition_schedule_id
+    ORDER BY rr.created_at ASC
+    ) = 1
     )
 
 
@@ -171,7 +154,7 @@ ON (
     (    br.start_date    >= m.prev_start
     AND br.start_date    <  m.m_start
     AND (br.recognised_at IS NULL
-    -- OR br.recognised_at <  m.prev_start 
+    -- OR br.recognised_at <  m.prev_start
     OR br.recognised_at >= m.m_start)
     )
     OR
@@ -202,6 +185,25 @@ FROM furbooks_revenue br
 ON br.start_date    >= m.m_start
     AND br.recognised_at >= m.prev_start
     AND br.recognised_at <  m.m_start
+GROUP BY m.month_num
+    )
+
+    -- ----------------------------------------------------------------------------
+-- Component 14: Current Month MTP
+-- ----------------------------------------------------------------------------
+        , current_month_mtp AS (
+SELECT /*+ BROADCAST(m) */
+    m.month_num,
+    'Current month MTP'                                                                 AS component,
+    14                                                                                       AS sort_order,
+    -COUNT(DISTINCT CONCAT(br.accountable_entity_type, '::', br.accountable_entity_id))      AS items_count,
+    -COUNT(DISTINCT br.user_id)                                                              AS cx_count,
+    -SUM(br.taxable_amount::float)                                                                  AS taxable_revenue
+FROM furbooks_revenue br
+    INNER JOIN months m
+ON br.recognised_at >= m.m_start
+    AND br.recognised_at <  m.m_end
+    AND br.start_date    >= m.m_end
 GROUP BY m.month_num
     )
 
@@ -243,115 +245,266 @@ WHERE LOWER(f.flag_based_on_Ua) = 'upsell'
 GROUP BY m.month_num
     )
 
-        , pickups_base AS (
+-- Pickup-date base from rental_churn_query.
+-- rnk = 1 → most recent RR per entity (avoids fan-out across multiple RR periods).
+-- CAST(pickup_date AS DATE) normalises mixed DATE/TIMESTAMP from churn query.
+        , churn_pickups_base AS (
 SELECT
-    accountable_entity_id,
-    accountable_entity_type,
-    user_id,
-    taxable_amount::float,
-    pickup_type,
-    return_entity_state,
-    DATE(return_created_at) AS return_created_at,
-    cancelled_at
-FROM furlenco_analytics.user_defined_tables.pickup_revenue_movement_item_attachs
-
+    entity_id,
+    entity_type,
+    user_ids,
+    taxable_amount,
+    churn_flag,
+    transaction_type,
+    payment_date,
+    CAST(pickup_date AS DATE)                                                    AS pickup_date
+FROM furlenco_analytics.user_defined_tables.rental_churn_query
+WHERE rnk         = 1
+  and (entity_id, entity_type) not in (select accountable_entity_id, accountable_entity_type
+    FROM furbooks_revenue br
+    INNER JOIN months m
+    ON br.recognised_at >= m.m_start
+  AND br.recognised_at <  m.m_end
+  AND br.start_date    >= m.m_end)
 
     )
+
+
+
 -- ----------------------------------------------------------------------------
--- Component 6: Total Pickup Raised
+-- Component 6: Total Pickup — return_item only (Pickup date basis)
 -- ----------------------------------------------------------------------------
-        , pickup_raised_all AS (
+    , total_pickups AS (
 SELECT /*+ BROADCAST(m) */
     m.month_num,
-    'Pickup raised (Total)'                                                                  AS component,
-    6                                                                                        AS sort_order,
-    -COUNT(DISTINCT CONCAT(pb.accountable_entity_type, '::', pb.accountable_entity_id))      AS items_count,
-    -COUNT(DISTINCT pb.user_id)                                                              AS cx_count,
-    -SUM(pb.taxable_amount::float::float)                                                                  AS taxable_revenue
-FROM pickups_base pb
-    JOIN months m
-ON pb.return_created_at >= m.m_start
-    AND pb.return_created_at <  m.m_end
+    'Total pickup (Return Request Date)'                                           AS component,
+    6                                                                            AS sort_order,
+    -COUNT(DISTINCT CONCAT(cp.entity_type, '::', cp.entity_id))                  AS items_count,
+    -COUNT(DISTINCT cp.user_ids)                                                 AS cx_count,
+    -SUM(cp.taxable_amount::FLOAT)                                               AS taxable_revenue
+FROM churn_pickups_base                                                          cp
+    JOIN months                                                                      m
+ON cp.payment_date >= m.m_start
+    AND cp.payment_date <  m.m_end
+WHERE cp.transaction_type = 'return_item'
 GROUP BY m.month_num
     )
 
 -- ----------------------------------------------------------------------------
--- Component 7: Partial Pickups
+-- Component 7: Partial Pickups — return_item only (Pickup date basis)
 -- ----------------------------------------------------------------------------
         , partial_pickups AS (
 SELECT /*+ BROADCAST(m) */
     m.month_num,
-    'Partial pickup (Reduction in item count)'                                               AS component,
-    7                                                                                        AS sort_order,
-    -COUNT(DISTINCT CONCAT(pb.accountable_entity_type, '::', pb.accountable_entity_id))      AS items_count,
-    -0                                                                                       AS cx_count,
-    -SUM(pb.taxable_amount::float)                                                                  AS taxable_revenue
-FROM pickups_base pb
-    JOIN months m
-ON pb.return_created_at >= m.m_start
-    AND pb.return_created_at <  m.m_end
-WHERE pb.pickup_type = 'PARTIAL'
-  AND pb.return_entity_state <> 'CANCELLED'
+    'Partial pickup (Reduction in item count)'                                   AS component,
+    7                                                                            AS sort_order,
+    -COUNT(DISTINCT CONCAT(cp.entity_type, '::', cp.entity_id))                  AS items_count,
+    -0                                                                           AS cx_count,
+    -SUM(cp.taxable_amount::FLOAT)                                               AS taxable_revenue
+FROM churn_pickups_base                                                          cp
+    JOIN months                                                                      m
+ON cp.payment_date >= m.m_start
+    AND cp.payment_date <  m.m_end
+WHERE cp.churn_flag       = 'PARTIAL'
+  AND cp.transaction_type = 'return_item'
 GROUP BY m.month_num
     )
 
 -- ----------------------------------------------------------------------------
--- Component 8: Full Pickups
+-- Component 8: Full Pickups — return_item only (Pickup date basis)
 -- ----------------------------------------------------------------------------
         , full_pickups AS (
 SELECT /*+ BROADCAST(m) */
     m.month_num,
-    'Full pickup (Reduction of Cx)'                                                          AS component,
-    8                                                                                        AS sort_order,
-    -COUNT(DISTINCT CONCAT(pb.accountable_entity_type, '::', pb.accountable_entity_id))      AS items_count,
-    -COUNT(DISTINCT pb.user_id)                                                              AS cx_count,
-    -SUM(pb.taxable_amount::float)                                                                  AS taxable_revenue
-FROM pickups_base pb
-    JOIN months m
-ON pb.return_created_at >= m.m_start
-    AND pb.return_created_at <  m.m_end
-WHERE pb.pickup_type = 'FULL'
-  AND pb.return_entity_state <> 'CANCELLED'
+    'Full pickup (Reduction of Cx)'                                              AS component,
+    8                                                                            AS sort_order,
+    -COUNT(DISTINCT CONCAT(cp.entity_type, '::', cp.entity_id))                  AS items_count,
+    -COUNT(DISTINCT cp.user_ids)                                                 AS cx_count,
+    -SUM(cp.taxable_amount::FLOAT)                                               AS taxable_revenue
+FROM churn_pickups_base                                                          cp
+    JOIN months                                                                      m
+ON cp.payment_date >= m.m_start
+    AND cp.payment_date <  m.m_end
+WHERE cp.churn_flag       = 'FULL'
+  AND cp.transaction_type = 'return_item'
 GROUP BY m.month_num
     )
 
 -- ----------------------------------------------------------------------------
--- Component 9: Pickup Cancellations
+-- Component 9: TTO Total (Pickup date basis)
 -- ----------------------------------------------------------------------------
-        , pickup_cancellations AS (
+        , total_tto AS (
 SELECT /*+ BROADCAST(m) */
     m.month_num,
-    'Pickup cancellations'                                                                   AS component,
-    9                                                                                        AS sort_order,
-    COUNT(DISTINCT CONCAT(pb.accountable_entity_type, '::', pb.accountable_entity_id))       AS items_count,
-    COUNT(DISTINCT pb.user_id)                                                               AS cx_count,
-    SUM(pb.taxable_amount::float)                                                                   AS taxable_revenue
-FROM pickups_base pb
-    JOIN months m
-ON pb.cancelled_at >= m.m_start
-    AND pb.cancelled_at <  m.m_end
-WHERE pb.return_entity_state = 'CANCELLED'
+    'TTO (Total - TTO Transaction Date)'                                            AS component,
+    9                                                                            AS sort_order,
+    -COUNT(DISTINCT CONCAT(cp.entity_type, '::', cp.entity_id))                  AS items_count,
+    -COUNT(DISTINCT cp.user_ids)                                                 AS cx_count,
+    -SUM(cp.taxable_amount::FLOAT)                                               AS taxable_revenue
+FROM churn_pickups_base                                                          cp
+    JOIN months                                                                      m
+ON cp.payment_date >= m.m_start
+    AND cp.payment_date <  m.m_end
+WHERE cp.transaction_type = 'rent_to_purchase_item'
 GROUP BY m.month_num
     )
 
 -- ----------------------------------------------------------------------------
--- Component 10: Current Month MTP
+-- Component 10: TTO Partial (Pickup date basis)
 -- ----------------------------------------------------------------------------
-        , current_month_mtp AS (
+        , partial_tto AS (
 SELECT /*+ BROADCAST(m) */
     m.month_num,
-    'Minimum tenure charges'                                                                 AS component,
-    10                                                                                       AS sort_order,
-    -COUNT(DISTINCT CONCAT(br.accountable_entity_type, '::', br.accountable_entity_id))      AS items_count,
-    -COUNT(DISTINCT br.user_id)                                                              AS cx_count,
-    -SUM(br.taxable_amount::float)                                                                  AS taxable_revenue
-FROM furbooks_revenue br
-    INNER JOIN months m
-ON br.recognised_at >= m.m_start
-    AND br.recognised_at <  m.m_end
-    AND br.start_date    >= m.m_end
+    'TTO - Partial (Reduction in item count)'                                    AS component,
+    10                                                                           AS sort_order,
+    -COUNT(DISTINCT CONCAT(cp.entity_type, '::', cp.entity_id))                  AS items_count,
+    -0                                                                           AS cx_count,
+    -SUM(cp.taxable_amount::FLOAT)                                               AS taxable_revenue
+FROM churn_pickups_base                                                          cp
+    JOIN months                                                                      m
+ON cp.payment_date >= m.m_start
+    AND cp.payment_date <  m.m_end
+WHERE cp.transaction_type = 'rent_to_purchase_item'
+  AND cp.churn_flag       = 'PARTIAL'
 GROUP BY m.month_num
     )
+
+-- ----------------------------------------------------------------------------
+-- Component 11: TTO Full (Pickup date basis)
+-- ----------------------------------------------------------------------------
+        , full_tto AS (
+SELECT /*+ BROADCAST(m) */
+    m.month_num,
+    'TTO - Full (Reduction of Cx)'                                               AS component,
+    11                                                                           AS sort_order,
+    -COUNT(DISTINCT CONCAT(cp.entity_type, '::', cp.entity_id))                  AS items_count,
+    -COUNT(DISTINCT cp.user_ids)                                                 AS cx_count,
+    -SUM(cp.taxable_amount::FLOAT)                                               AS taxable_revenue
+FROM churn_pickups_base                                                          cp
+    JOIN months                                                                      m
+ON cp.payment_date >= m.m_start
+    AND cp.payment_date <  m.m_end
+WHERE cp.transaction_type = 'rent_to_purchase_item'
+  AND cp.churn_flag       = 'FULL'
+GROUP BY m.month_num
+    )
+
+-- ----------------------------------------------------------------------------
+-- Swap-out base: entities physically swapped out, one row per entity per RR period.
+-- rr_rnk = 1 → most recent RR on/before fulfillment_date (avoids fan-out).
+-- fulfillment_date converted to IST DATE for consistent month bucketing.
+-- Both swap_attachments and swap_items filtered to action = 'SWAP_OUT' + state = 'FULFILLED'.
+-- ----------------------------------------------------------------------------
+        , swap_base AS (
+SELECT
+    sw.entity_id,
+    sw.entity_type,
+    se.user_id,
+    DATE(sw.fulfillment_date + INTERVAL '330 minutes')                           AS fulfillment_date,
+    br.taxable_amount,
+    DENSE_RANK() OVER (
+    PARTITION BY sw.entity_id, sw.entity_type
+    ORDER BY br.start_date DESC
+    )                                                                            AS rr_rnk
+FROM (
+    SELECT attachment_id AS entity_id, 'ATTACHMENT' AS entity_type, fulfillment_date
+    FROM furlenco_silver.order_management_systems_evolve.swap_attachments
+    WHERE action           = 'SWAP_OUT'
+    AND state            = 'FULFILLED'
+    AND fulfillment_date IS NOT NULL
+    UNION ALL
+    SELECT item_id AS entity_id, 'ITEM' AS entity_type, fulfillment_date
+    FROM furlenco_silver.order_management_systems_evolve.swap_items
+    WHERE action           = 'SWAP_OUT'
+    AND state            = 'FULFILLED'
+    AND fulfillment_date IS NOT NULL
+    ) sw
+    LEFT JOIN sms_entity                                                             se
+ON  se.id          = sw.entity_id
+    AND se.entity_type = sw.entity_type
+    LEFT JOIN furbooks_revenue                                                       br
+    ON  br.accountable_entity_id   = sw.entity_id
+    AND br.accountable_entity_type = sw.entity_type
+    AND br.start_date             <= DATE(sw.fulfillment_date + INTERVAL '330 minutes')
+    )
+
+    -- ----------------------------------------------------------------------------
+-- Component 12: Swapped Out (Fulfillment date basis)
+-- cx_count = 0: customer retains subscription (swap-in replaces the item).
+-- ----------------------------------------------------------------------------
+    , swapped_out AS (
+SELECT /*+ BROADCAST(m) */
+    m.month_num,
+    'Swapped out'                                                                AS component,
+    12                                                                           AS sort_order,
+    -COUNT(DISTINCT CONCAT(sb.entity_type, '::', sb.entity_id))                  AS items_count,
+    -0                                                                           AS cx_count,
+    -SUM(sb.taxable_amount::FLOAT)                                               AS taxable_revenue
+FROM swap_base                                                                   sb
+    JOIN months                                                                      m
+ON sb.fulfillment_date >= m.m_start
+    AND sb.fulfillment_date <  m.m_end
+WHERE sb.rr_rnk = 1
+GROUP BY m.month_num
+    )
+
+-- Swap-in base: entities physically swapped in, one row per entity per RR period.
+-- rr_rnk = 1 → first RR on/after fulfillment_date (new item's opening cycle).
+-- Uses ASC ordering to capture the incoming item's first revenue cycle.
+        , swap_in_base AS (
+SELECT
+    sw.entity_id,
+    sw.entity_type,
+    se.user_id,
+    DATE(sw.fulfillment_date + INTERVAL '330 minutes')                           AS fulfillment_date,
+    br.taxable_amount,
+    DENSE_RANK() OVER (
+    PARTITION BY sw.entity_id, sw.entity_type
+    ORDER BY br.start_date ASC
+    )                                                                            AS rr_rnk
+FROM (
+    SELECT attachment_id AS entity_id, 'ATTACHMENT' AS entity_type, fulfillment_date
+    FROM furlenco_silver.order_management_systems_evolve.swap_attachments
+    WHERE action           = 'SWAP_IN'
+    AND state            = 'FULFILLED'
+    AND fulfillment_date IS NOT NULL
+    UNION ALL
+    SELECT item_id AS entity_id, 'ITEM' AS entity_type, fulfillment_date
+    FROM furlenco_silver.order_management_systems_evolve.swap_items
+    WHERE action           = 'SWAP_IN'
+    AND state            = 'FULFILLED'
+    AND fulfillment_date IS NOT NULL
+    ) sw
+    LEFT JOIN sms_entity                                                             se
+ON  se.id          = sw.entity_id
+    AND se.entity_type = sw.entity_type
+    LEFT JOIN furbooks_revenue                                                       br
+    ON  br.accountable_entity_id   = sw.entity_id
+    AND br.accountable_entity_type = sw.entity_type
+    AND br.start_date             >= DATE(sw.fulfillment_date + INTERVAL '330 minutes')
+    )
+
+    -- ----------------------------------------------------------------------------
+-- Component 13: Swapped In (Fulfillment date basis)
+-- cx_count = 0: existing customer receiving a replacement item (no new subscriber).
+-- ----------------------------------------------------------------------------
+    , swapped_in AS (
+SELECT /*+ BROADCAST(m) */
+    m.month_num,
+    'Swapped in'                                                                 AS component,
+    13                                                                           AS sort_order,
+    COUNT(DISTINCT CONCAT(sb.entity_type, '::', sb.entity_id))                   AS items_count,
+    0                                                                            AS cx_count,
+    SUM(sb.taxable_amount::FLOAT)                                                AS taxable_revenue
+FROM swap_in_base                                                                sb
+    JOIN months                                                                      m
+ON sb.fulfillment_date >= m.m_start
+    AND sb.fulfillment_date <  m.m_end
+WHERE sb.rr_rnk = 1
+GROUP BY m.month_num
+    )
+
+
 
 -- ----------------------------------------------------------------------------
 -- Component 11: Penalty
@@ -361,7 +514,7 @@ GROUP BY m.month_num
 SELECT /*+ BROADCAST(m) */
     m.month_num,
     'Penalty'                                AS component,
-    11                                       AS sort_order,
+    15                                       AS sort_order,
     COUNT(DISTINCT product_entity_id)         AS items_count,
     COUNT(DISTINCT pl.user_id)                AS cx_count,
     SUM(CAST(rr.monetary_components_taxableAmount AS DOUBLE)) AS taxable_revenue
@@ -378,58 +531,25 @@ GROUP BY m.month_num
     )
 
 -- ----------------------------------------------------------------------------
--- Component 12 & 13: Plan Transition
--- Single windowed CTE (tenure_windowed) computes all LAG values for both
--- plan-transition and accrual-change detection in one pass over tenure_base.
+-- Accrual Change Detection
+-- tenure_windowed computes LAG values for accrual-change detection over tenure_base.
 -- ----------------------------------------------------------------------------
         , tenure_windowed AS (
 SELECT
     accountable_entity_id, accountable_entity_type, start_date, end_date,
     tenure, taxableAmount,
     revenue_recognition_type,
-    LAG(tenure)                  OVER (PARTITION BY accountable_entity_id, accountable_entity_type ORDER BY start_date) AS previous_tenure,
-    LAG(start_date)              OVER (PARTITION BY accountable_entity_id, accountable_entity_type ORDER BY start_date) AS previous_start_date,
-    LAG(end_date)                OVER (PARTITION BY accountable_entity_id, accountable_entity_type ORDER BY start_date) AS previous_end_date,
-    LAG(taxableAmount)           OVER (PARTITION BY accountable_entity_id, accountable_entity_type ORDER BY start_date) AS previous_taxableAmount,
-    LAG(revenue_recognition_type)OVER (PARTITION BY accountable_entity_id, accountable_entity_type ORDER BY start_date) AS previous_recognition_type,
+    LAG(tenure)                   OVER w AS previous_tenure,
+    LAG(start_date)               OVER w AS previous_start_date,
+    LAG(end_date)                 OVER w AS previous_end_date,
+    LAG(taxableAmount)            OVER w AS previous_taxableAmount,
+    LAG(revenue_recognition_type) OVER w AS previous_recognition_type,
     external_reference_type, created_at, monetary_components
 FROM tenure_base
+    WINDOW w AS (
+    PARTITION BY accountable_entity_id, accountable_entity_type
+    ORDER BY start_date ASC, created_at ASC
     )
-
-        , customer_plan_changes AS (
-SELECT
-    tc.accountable_entity_id, tc.accountable_entity_type,
-    tc.start_date, tc.end_date,
-    tc.previous_tenure, tc.tenure AS current_tenure,
-    tc.previous_start_date, tc.previous_end_date,
-    se.user_id, tc.external_reference_type,
-    tc.previous_taxableAmount::DECIMAL(10,2)                                            AS previous_month_revenue,
-    tc.taxableAmount::DECIMAL(10,2)                                                     AS current_month_revenue,
-    (tc.taxableAmount::DECIMAL(10,2) - tc.previous_taxableAmount::DECIMAL(10,2))        AS revenue_difference,
-    tc.created_at, m.month_num
-FROM tenure_windowed tc
-    LEFT JOIN sms_entity se ON se.id = tc.accountable_entity_id AND se.entity_type = tc.accountable_entity_type
-    JOIN months m ON tc.start_date >= m.m_start AND tc.start_date < m.m_end
-WHERE tc.previous_tenure <> tc.tenure
-  AND tc.previous_tenure is not null
-    )
-
-    , plan_transition_positive AS (
-SELECT month_num, 'Plan transition - Positive' AS component, 12 AS sort_order,
-    COUNT(DISTINCT CONCAT(accountable_entity_type, '::', accountable_entity_id)) AS items_count,
-    COUNT(DISTINCT user_id) AS cx_count, SUM(revenue_difference) AS taxable_revenue
-FROM customer_plan_changes
-WHERE previous_end_date IS NOT NULL AND previous_tenure IS NOT NULL AND current_tenure > previous_tenure
-GROUP BY month_num
-    )
-
-        , plan_transition_negative AS (
-SELECT month_num, 'Plan transition - Negative' AS component, 13 AS sort_order,
-    COUNT(DISTINCT CONCAT(accountable_entity_type, '::', accountable_entity_id)) AS items_count,
-    COUNT(DISTINCT user_id) AS cx_count, SUM(revenue_difference) AS taxable_revenue
-FROM customer_plan_changes
-WHERE previous_end_date IS NOT NULL AND previous_tenure IS NOT NULL AND current_tenure < previous_tenure
-GROUP BY month_num
     )
 
 -- ----------------------------------------------------------------------------
@@ -454,7 +574,7 @@ WHERE rc.previous_recognition_type IS NOT NULL
     )
 
     , accrual_positive AS (
-SELECT month_num, 'RO (Renewal Overdue) - Positive' AS component, 14 AS sort_order,
+SELECT month_num, 'RO (Renewal Overdue) - Positive' AS component, 18 AS sort_order,
     COUNT(DISTINCT CONCAT(accountable_entity_type, '::', accountable_entity_id)) AS items_count,
     COUNT(DISTINCT user_id) AS cx_count, SUM(revenue_difference) AS taxable_revenue
 FROM customer_accrual_changes WHERE current_recognition_type = 'ACCRUAL'
@@ -462,7 +582,7 @@ GROUP BY month_num
     )
 
         , accrual_negative AS (
-SELECT month_num, 'RO (Renewal Overdue) - Negative' AS component, 15 AS sort_order,
+SELECT month_num, 'RO (Renewal Overdue) - Negative' AS component, 19 AS sort_order,
     COUNT(DISTINCT CONCAT(accountable_entity_type, '::', accountable_entity_id)) AS items_count,
     COUNT(DISTINCT user_id) AS cx_count, SUM(revenue_difference) AS taxable_revenue
 FROM customer_accrual_changes WHERE current_recognition_type = 'DEFERRAL'
@@ -470,7 +590,119 @@ GROUP BY month_num
     )
 
 -- ----------------------------------------------------------------------------
--- Component 16 & 17: Discount Revenue Change
+-- Component 16: Plan Transition
+-- Fires only when tenure changed between consecutive schedules.
+-- Revenue delta = change in UPFRONT discount (godfather type = 'UPFRONT').
+-- Two-CTE pattern: Spark SQL prohibits JOIN in same FROM as LATERAL VIEW EXPLODE.
+-- ----------------------------------------------------------------------------
+
+-- Step A: One RR per schedule (earliest) — dedup before exploding discounts.
+        , rr_schedule_deduped AS (
+SELECT
+    accountable_entity_id,
+    accountable_entity_type,
+    revenue_recognition_schedule_id,
+    monetary_components_discounts
+FROM furlenco_silver.furbooks_evolve.revenue_recognitions
+WHERE vertical = 'FURLENCO_RENTAL'
+  AND state NOT IN ('CANCELLED', 'INVALIDATED')
+  AND accountable_entity_type IN ('ITEM', 'ATTACHMENT')
+  AND external_reference_type <> 'SETTLEMENT'
+  AND created_at >= '2024-06-01'
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY accountable_entity_id, accountable_entity_type, revenue_recognition_schedule_id
+    ORDER BY created_at ASC
+) = 1
+    )
+
+-- Step B: Explode discount array from deduped RRs (no JOINs allowed here).
+        , rr_schedule_discounts_exploded AS (
+SELECT
+    r.accountable_entity_id,
+    r.accountable_entity_type,
+    r.revenue_recognition_schedule_id,
+    d.catalogReferenceId,
+    d.amount AS discount_amount
+FROM rr_schedule_deduped r
+    LATERAL VIEW OUTER EXPLODE(
+    from_json(CAST(r.monetary_components_discounts AS STRING),
+    'array<struct<amount:double,catalogReferenceId:string,code:string>>')
+    ) AS d
+    )
+
+-- Step C: Sum UPFRONT discounts per schedule; include tenure for gate condition.
+        , upfront_discount_per_schedule AS (
+SELECT
+    e.accountable_entity_id,
+    e.accountable_entity_type,
+    e.revenue_recognition_schedule_id,
+    DATE(rrs.start_date)                                               AS start_date,
+    ROUND(DATEDIFF(DAY, rrs.start_date, rrs.end_date) / 30.45)        AS tenure,
+    SUM(COALESCE(e.discount_amount, 0))                                AS upfront_discount_amount
+FROM rr_schedule_discounts_exploded e
+    JOIN furlenco_silver.godfather_evolve.discounts gd
+    ON e.catalogReferenceId = gd.id AND gd.type = 'UPFRONT'
+    JOIN furlenco_silver.furbooks_evolve.revenue_recognition_schedules rrs
+    ON rrs.id = e.revenue_recognition_schedule_id
+GROUP BY
+    e.accountable_entity_id, e.accountable_entity_type,
+    e.revenue_recognition_schedule_id,
+    DATE(rrs.start_date),
+    ROUND(DATEDIFF(DAY, rrs.start_date, rrs.end_date) / 30.45)
+    )
+
+-- Step D: LAG to compare UPFRONT discount and tenure across consecutive schedules.
+        , plan_transition_windowed AS (
+SELECT
+    accountable_entity_id, accountable_entity_type, start_date,
+    tenure,
+    upfront_discount_amount,
+    LAG(tenure)                  OVER w AS previous_tenure,
+    LAG(upfront_discount_amount) OVER w AS previous_upfront_discount_amount,
+    LAG(start_date)              OVER w AS previous_start_date
+FROM upfront_discount_per_schedule
+    WINDOW w AS (
+    PARTITION BY accountable_entity_id, accountable_entity_type
+    ORDER BY start_date ASC
+    )
+    )
+
+-- Step E: Apply tenure gate + join to months.
+-- revenue_difference = previous_upfront_discount - current_upfront_discount.
+        , customer_plan_transition AS (
+SELECT
+    pt.accountable_entity_id, pt.accountable_entity_type,
+    pt.start_date, pt.previous_start_date,
+    pt.tenure          AS current_tenure,
+    pt.previous_tenure,
+    se.user_id,
+    (pt.previous_upfront_discount_amount - pt.upfront_discount_amount) AS revenue_difference,
+    m.month_num
+FROM plan_transition_windowed pt
+    LEFT JOIN sms_entity se
+    ON se.id = pt.accountable_entity_id AND se.entity_type = pt.accountable_entity_type
+    JOIN months m
+    ON pt.start_date >= m.m_start AND pt.start_date < m.m_end
+WHERE pt.previous_tenure IS NOT NULL
+  AND pt.previous_tenure <> pt.tenure
+  AND pt.previous_upfront_discount_amount IS NOT NULL
+    )
+
+        , plan_transition AS (
+SELECT
+    month_num,
+    'Plan transition'                                                                AS component,
+    16                                                                               AS sort_order,
+    COUNT(DISTINCT CONCAT(accountable_entity_type, '::', accountable_entity_id))     AS items_count,
+    COUNT(DISTINCT user_id)                                                          AS cx_count,
+    SUM(revenue_difference)                                                          AS taxable_revenue
+FROM customer_plan_transition
+GROUP BY month_num
+    )
+
+-- ----------------------------------------------------------------------------
+-- Discount Revenue Change
+-- Excludes entities where tenure changed (those are captured in plan_transition).
 -- ----------------------------------------------------------------------------
         , discount_per_cycle AS (
 SELECT
@@ -513,13 +745,20 @@ FROM discount_changes dc
     JOIN months m ON dc.start_date >= m.m_start AND dc.start_date < m.m_end
 WHERE dc.previous_discount_amount IS NOT NULL
   AND dc.previous_discount_amount <> dc.total_discount_amount
+  -- Exclude entities where tenure changed — those are already captured in plan_transition
+  AND NOT EXISTS (
+        SELECT 1 FROM customer_plan_transition cpt
+        WHERE cpt.accountable_entity_id   = dc.accountable_entity_id
+          AND cpt.accountable_entity_type = dc.accountable_entity_type
+          AND cpt.month_num               = m.month_num
+  )
     )
 
     , discount_given AS (
 SELECT
     m.month_num,
     'Discount given'                                                                          AS component,
-    16                                                                                        AS sort_order,
+    20                                                                                        AS sort_order,
     COUNT(DISTINCT CONCAT(dp.accountable_entity_type, '::', dp.accountable_entity_id))        AS items_count,
     COUNT(DISTINCT se.user_id)                                                                AS cx_count,
     SUM(dp.total_discount_amount)                                                             AS taxable_revenue
@@ -532,14 +771,14 @@ GROUP BY m.month_num
 -- Discount change total (17) + breakdown by direction (18 positive, 19 negative)
 -- consolidated into one CTE over a single scan of customer_discount_changes.
         , discount_changes_all AS (
-SELECT month_num, 'Discount change' AS component, 17 AS sort_order,
+SELECT month_num, 'Discount change' AS component, 21 AS sort_order,
     COUNT(DISTINCT CONCAT(accountable_entity_type, '::', accountable_entity_id)) AS items_count,
     COUNT(DISTINCT user_id) AS cx_count,
     SUM(revenue_difference) AS taxable_revenue
 FROM customer_discount_changes
 GROUP BY month_num
 UNION ALL
-SELECT month_num, 'Discount change - Positive' AS component, 18 AS sort_order,
+SELECT month_num, 'Discount change - Positive' AS component, 22 AS sort_order,
     COUNT(DISTINCT CONCAT(accountable_entity_type, '::', accountable_entity_id)) AS items_count,
     COUNT(DISTINCT user_id) AS cx_count,
     SUM(revenue_difference) AS taxable_revenue
@@ -547,7 +786,7 @@ FROM customer_discount_changes
 WHERE revenue_difference > 0
 GROUP BY month_num
 UNION ALL
-SELECT month_num, 'Discount change - Negative' AS component, 19 AS sort_order,
+SELECT month_num, 'Discount change - Negative' AS component, 23 AS sort_order,
     COUNT(DISTINCT CONCAT(accountable_entity_type, '::', accountable_entity_id)) AS items_count,
     COUNT(DISTINCT user_id) AS cx_count,
     SUM(revenue_difference) AS taxable_revenue
@@ -600,10 +839,10 @@ SELECT
     month_num,
     vas_category                                                         AS component,
     CASE vas_category
-    WHEN 'VAS Revenue - Furlenco Care & Flexi' THEN 20
-    WHEN 'VAS Revenue - Delivery charges'      THEN 21
-    WHEN 'VAS Revenue - Installation Charges'  THEN 22
-    ELSE                                             23
+    WHEN 'VAS Revenue - Furlenco Care & Flexi' THEN 24
+    WHEN 'VAS Revenue - Delivery charges'      THEN 25
+    WHEN 'VAS Revenue - Installation Charges'  THEN 26
+    ELSE                                             27
     END                                                                  AS sort_order,
     COUNT(DISTINCT accountable_entity_id)                                AS items_count,
     COUNT(DISTINCT user_id)                                              AS cx_count,
@@ -622,14 +861,17 @@ SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue 
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM mtp1_adjustment
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM new_deliveries
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM upsells
-UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM pickup_raised_all
+UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM total_pickups
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM partial_pickups
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM full_pickups
-UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM pickup_cancellations
+UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM total_tto
+UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM partial_tto
+UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM full_tto
+UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM swapped_out
+UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM swapped_in
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM current_month_mtp
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM penalty
-UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM plan_transition_positive
-UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM plan_transition_negative
+UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM plan_transition
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM accrual_positive
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM accrual_negative
 UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM discount_given
@@ -651,25 +893,59 @@ FROM all_components
 GROUP BY component, sort_order
     )
 
--- Adjusted Opening = Opening + MTP1 (MTP1 is negative, so this nets out
--- Scenario 1.2 future-start cycles recognised early)
-        , adj_opening_row AS (
+-- Adjusted Opening = Opening + mtp1_adjustment (mtp1_adjustment is negative, so this nets out
+-- Scenario 1.2 future-start cycles recognised early — leaving S1.1 only)
+-- Fix: was filtering for 'MTP1' which never existed; correct filter uses sort_order to distinguish
+-- mtp1_adjustment (sort_order=2) from current_month_mtp (sort_order=14), both named 'Minimum tenure charges'
+
+
+        , opening_row AS (
 SELECT
-    SUM(CASE WHEN component IN ('Opening_revenue', 'MTP1') THEN COALESCE(m1_items, 0) ELSE 0 END) AS m1_items,
-    SUM(CASE WHEN component IN ('Opening_revenue', 'MTP1') THEN COALESCE(m1_cx,    0) ELSE 0 END) AS m1_cx,
-    SUM(CASE WHEN component IN ('Opening_revenue', 'MTP1') THEN COALESCE(m1_rev,   0) ELSE 0 END) AS m1_rev,
-    SUM(CASE WHEN component IN ('Opening_revenue', 'MTP1') THEN COALESCE(m2_items, 0) ELSE 0 END) AS m2_items,
-    SUM(CASE WHEN component IN ('Opening_revenue', 'MTP1') THEN COALESCE(m2_cx,    0) ELSE 0 END) AS m2_cx,
-    SUM(CASE WHEN component IN ('Opening_revenue', 'MTP1') THEN COALESCE(m2_rev,   0) ELSE 0 END) AS m2_rev
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    THEN COALESCE(m1_items, 0) ELSE 0 END) AS m1_items,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    THEN COALESCE(m1_cx,    0) ELSE 0 END) AS m1_cx,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    THEN COALESCE(m1_rev,   0) ELSE 0 END) AS m1_rev,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    THEN COALESCE(m2_items, 0) ELSE 0 END) AS m2_items,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    THEN COALESCE(m2_cx,    0) ELSE 0 END) AS m2_cx,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    THEN COALESCE(m2_rev,   0) ELSE 0 END) AS m2_rev
 FROM base_wide
-WHERE component IN ('Opening_revenue', 'MTP1')
+WHERE (component = 'Opening_revenue'        AND sort_order = 1)
+
+    )
+    , adj_opening_row AS (
+SELECT
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+    THEN COALESCE(m1_items, 0) ELSE 0 END) AS m1_items,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+    THEN COALESCE(m1_cx,    0) ELSE 0 END) AS m1_cx,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+    THEN COALESCE(m1_rev,   0) ELSE 0 END) AS m1_rev,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+    THEN COALESCE(m2_items, 0) ELSE 0 END) AS m2_items,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+    THEN COALESCE(m2_cx,    0) ELSE 0 END) AS m2_cx,
+    SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
+    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+    THEN COALESCE(m2_rev,   0) ELSE 0 END) AS m2_rev
+FROM base_wide
+WHERE (component = 'Opening_revenue'        AND sort_order = 1)
+   OR (component = 'Minimum tenure charges' AND sort_order = 2)
     )
 
 -- Total Closing Revenue
--- Intentionally excludes plan transitions (12–13), accrual changes (14–15),
--- discount changes (17–19), and VAS (20–23). These are informational movement
--- components only; the closing balance reflects headcount-driven revenue changes
--- (new deliveries, pickups, MTP, penalty) applied to the adjusted opening.
+-- Includes plan transition revenue delta (UPFRONT discount change when tenure changed).
+-- Excludes accrual changes, discount changes, and VAS — these are informational only.
+-- Items/cx counts are unaffected by plan changes (same subscriber, same item count).
     , closing_row AS (
 SELECT
     -- Items
@@ -679,14 +955,19 @@ SELECT
     'New deliveries (Addition of Cx)',
     'Upsell (Addition in item count)',
     'Partial pickup (Reduction in item count)',
-    'Full pickup (Reduction of Cx)'
+    'Full pickup (Reduction of Cx)',
+    'TTO - Partial (Reduction in item count)',
+    'TTO - Full (Reduction of Cx)',
+    'Swapped out',
+    'Swapped in'
     ) THEN COALESCE(bw.m1_items, 0) ELSE 0 END)                          AS m1_items,
     -- Cx
     MAX(ao.m1_cx)
     + SUM(CASE WHEN bw.component IN (
     'New deliveries (Addition of Cx)',
     'Upsell (Addition in item count)',
-    'Full pickup (Reduction of Cx)'
+    'Full pickup (Reduction of Cx)',
+    'TTO - Full (Reduction of Cx)'
     ) THEN COALESCE(bw.m1_cx, 0) ELSE 0 END)                             AS m1_cx,
     -- Revenue
     MAX(ao.m1_rev)
@@ -695,8 +976,13 @@ SELECT
     'Upsell (Addition in item count)',
     'Partial pickup (Reduction in item count)',
     'Full pickup (Reduction of Cx)',
-    'Minimum tenure charges',
-    'Penalty'
+    'TTO - Partial (Reduction in item count)',
+    'TTO - Full (Reduction of Cx)',
+    'Swapped out',
+    'Swapped in',
+    'Current month MTP',
+    'Penalty',
+    'Plan transition'
     ) THEN COALESCE(bw.m1_rev, 0) ELSE 0 END)                            AS m1_rev,
     -- Month 2 items
     MAX(ao.m2_items)
@@ -704,14 +990,19 @@ SELECT
     'New deliveries (Addition of Cx)',
     'Upsell (Addition in item count)',
     'Partial pickup (Reduction in item count)',
-    'Full pickup (Reduction of Cx)'
+    'Full pickup (Reduction of Cx)',
+    'TTO - Partial (Reduction in item count)',
+    'TTO - Full (Reduction of Cx)',
+    'Swapped out',
+    'Swapped in'
     ) THEN COALESCE(bw.m2_items, 0) ELSE 0 END)                          AS m2_items,
     -- Month 2 cx
     MAX(ao.m2_cx)
     + SUM(CASE WHEN bw.component IN (
     'New deliveries (Addition of Cx)',
     'Upsell (Addition in item count)',
-    'Full pickup (Reduction of Cx)'
+    'Full pickup (Reduction of Cx)',
+    'TTO - Full (Reduction of Cx)'
     ) THEN COALESCE(bw.m2_cx, 0) ELSE 0 END)                             AS m2_cx,
     -- Month 2 revenue
     MAX(ao.m2_rev)
@@ -720,21 +1011,27 @@ SELECT
     'Upsell (Addition in item count)',
     'Partial pickup (Reduction in item count)',
     'Full pickup (Reduction of Cx)',
-    'Minimum tenure charges',
-    'Penalty'
+    'TTO - Partial (Reduction in item count)',
+    'TTO - Full (Reduction of Cx)',
+    'Swapped out',
+    'Swapped in',
+    'Current month MTP',
+    'Penalty',
+    'Plan transition'
     ) THEN COALESCE(bw.m2_rev, 0) ELSE 0 END)                            AS m2_rev
 FROM base_wide bw
     CROSS JOIN adj_opening_row ao
     )
 
--- Gap = Month2 Opening minus Month1 Closing
+-- Gap = Month2 Adjusted Opening minus Month1 Closing
+-- Fix: was using raw Opening_revenue (S1.1+S1.2); now uses adj_opening_row (S1.1 only, MTP-adjusted)
         , gap_row AS (
 SELECT
-    COALESCE((SELECT m2_items FROM base_wide WHERE component = 'Opening_revenue'), 0) -
+    COALESCE((SELECT m2_items FROM opening_row), 0) -
     (SELECT m1_items FROM closing_row)  AS gap_items,
-    COALESCE((SELECT m2_cx   FROM base_wide WHERE component = 'Opening_revenue'), 0) -
+    COALESCE((SELECT m2_cx   FROM opening_row), 0) -
     (SELECT m1_cx    FROM closing_row)  AS gap_cx,
-    COALESCE((SELECT m2_rev  FROM base_wide WHERE component = 'Opening_revenue'), 0) -
+    COALESCE((SELECT m2_rev  FROM opening_row), 0) -
     (SELECT m1_rev   FROM closing_row)  AS gap_rev
     )
 
@@ -748,12 +1045,12 @@ SELECT 'Adjusted opening' AS component, 3 AS sort_order,
 FROM adj_opening_row
 
 UNION ALL
-SELECT 'Total closing Revenue' AS component, 26 AS sort_order,
+SELECT 'Total closing Revenue' AS component, 31 AS sort_order,
     m1_items, m1_cx, m1_rev, m2_items, m2_cx, m2_rev
 FROM closing_row
 
 UNION ALL
-SELECT 'Gap (Month1 Closing vs Month2 Opening)' AS component, 27 AS sort_order,
+SELECT 'Gap (Month1 Closing vs Month2 Opening)' AS component, 32 AS sort_order,
     gap_items AS m1_items, gap_cx AS m1_cx, gap_rev AS m1_rev,
     NULL      AS m2_items, NULL   AS m2_cx, NULL    AS m2_rev
 FROM gap_row
