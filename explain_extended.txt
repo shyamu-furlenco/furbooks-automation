@@ -1,0 +1,363 @@
+== Parsed Logical Plan ==
+'NameParameterizedQuery [month2_start, month1_start], [2026-02-01, 2026-01-01]
++- CTE [sms_entity, deduped_return_items, deduped_return_attachments, furbooks_revenue, months, tenure_base, opening_revenue, mtp1_adjustment, current_month_mtp, new_deliveries, upsells, churn_pickups_base, total_pickups, partial_pickups, full_pickups, total_tto, partial_tto, full_tto, swap_base, swapped_out, swap_in_base, swapped_in, penalty, tenure_windowed, customer_accrual_changes, ... 23 more fields]
+   :  :- 'SubqueryAlias sms_entity
+   :  :  +- 'Union false, false
+   :  :     :- 'Project ['id, ITEM AS entity_type#249723, 'user_id, 'user_details_displayId]
+   :  :     :  +- 'Filter NOT ('state = CANCELLED)
+   :  :     :     +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, items], [], false
+   :  :     +- 'Project ['id, ATTACHMENT AS entity_type#249724, 'user_id, 'user_details_displayId]
+   :  :        +- 'Filter NOT ('state = CANCELLED)
+   :  :           +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, attachments], [], false
+   :  :- 'SubqueryAlias deduped_return_items
+   :  :  +- 'Aggregate ['item_id], ['item_id, 'MIN('created_at) AS created_at#249725]
+   :  :     +- 'Filter ('state = COMPLETED)
+   :  :        +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, return_items], [], false
+   :  :- 'SubqueryAlias deduped_return_attachments
+   :  :  +- 'Aggregate ['attachment_id], ['attachment_id, 'MIN('created_at) AS created_at#249726]
+   :  :     +- 'Filter ('state = COMPLETED)
+   :  :        +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, return_attachments], [], false
+   :  :- 'SubqueryAlias furbooks_revenue
+   :  :  +- 'Project ['rr.id, 'rr.recognition_type, 'rr.accountable_entity_id, 'rr.accountable_entity_type, 'rr.state, 'DATE('rr.start_date) AS start_date#249727, 'DATE('rr.end_date) AS end_date#249728, (cast('rrs.monetary_components_taxableAmount as double) / 'ROUND((timestampdiff(DAY, 'rrs.start_date, 'rrs.end_date, None) / 30.45))) AS taxable_amount1#249729, (cast('rrs.monetary_components_postTaxAmount as double) / 'ROUND((timestampdiff(DAY, 'rrs.start_date, 'rrs.end_date, None) / 30.45))) AS post_tax_amount#249730, 'ROUND((timestampdiff(DAY, 'rrs.start_date, 'rrs.end_date, None) / 30.45)) AS tenure#249731, 'DATE('rr.to_be_recognised_on) AS to_be_recognised_on#249732, 'DATE(('rr.recognised_at + INTERVAL '330' MINUTE)) AS recognised_at#249733, 'DATE(('rr.created_at + INTERVAL '330' MINUTE)) AS created_at#249734, 'rr.external_reference_type, 'rr.monetary_components_taxableAmount AS taxable_amount#249735, 'rr.external_reference_id, 'rr.revenue_recognition_schedule_id, 'sms_entity.user_id, 'sms_entity.user_details_displayId, 'MIN('DATE('rr.start_date)) windowspecdefinition('rr.accountable_entity_id, 'rr.accountable_entity_type, unspecifiedframe$()) AS min_start_date#249736, 'COALESCE('DATE(('r_item.created_at + INTERVAL '330' MINUTE)), 'DATE(('r_attachment.created_at + INTERVAL '330' MINUTE))) AS return_created_at#249737]
+   :  :     +- 'Filter ((('rr.vertical = FURLENCO_RENTAL) AND NOT 'rr.state IN (CANCELLED,INVALIDATED)) AND 'rr.accountable_entity_type IN (ITEM,ATTACHMENT))
+   :  :        +- 'Join LeftOuter, (('sms_entity.id = 'rr.accountable_entity_id) AND ('sms_entity.entity_type = 'rr.accountable_entity_type))
+   :  :           :- 'Join LeftOuter, ('rrs.id = 'rr.revenue_recognition_schedule_id)
+   :  :           :  :- 'Join LeftOuter, (('rr.accountable_entity_id = 'r_attachment.attachment_id) AND ('rr.accountable_entity_type = ATTACHMENT))
+   :  :           :  :  :- 'Join LeftOuter, (('rr.accountable_entity_id = 'r_item.item_id) AND ('rr.accountable_entity_type = ITEM))
+   :  :           :  :  :  :- 'SubqueryAlias rr
+   :  :           :  :  :  :  +- 'UnresolvedRelation [furlenco_silver, furbooks_evolve, revenue_recognitions], [], false
+   :  :           :  :  :  +- 'SubqueryAlias r_item
+   :  :           :  :  :     +- 'UnresolvedRelation [deduped_return_items], [], false
+   :  :           :  :  +- 'SubqueryAlias r_attachment
+   :  :           :  :     +- 'UnresolvedRelation [deduped_return_attachments], [], false
+   :  :           :  +- 'SubqueryAlias rrs
+   :  :           :     +- 'UnresolvedRelation [furlenco_silver, furbooks_evolve, revenue_recognition_schedules], [], false
+   :  :           +- 'UnresolvedRelation [sms_entity], [], false
+   :  :- 'SubqueryAlias months
+   :  :  +- 'Union false, false
+   :  :     :- 'Project [1 AS month_num#249738, cast(namedparameter(month1_start) as date) AS m_start#249739, 'ADD_MONTHS(cast(namedparameter(month1_start) as date), 1) AS m_end#249740, 'ADD_MONTHS(cast(namedparameter(month1_start) as date), -1) AS prev_start#249741, 'DATE_FORMAT(cast(namedparameter(month1_start) as date), MMM yyyy) AS m_label#249742]
+   :  :     :  +- OneRowRelation
+   :  :     +- 'Project [unresolvedalias(2), unresolvedalias(cast(namedparameter(month2_start) as date)), unresolvedalias('ADD_MONTHS(cast(namedparameter(month2_start) as date), 1)), unresolvedalias('ADD_MONTHS(cast(namedparameter(month2_start) as date), -1)), unresolvedalias('DATE_FORMAT(cast(namedparameter(month2_start) as date), MMM yyyy))]
+   :  :        +- OneRowRelation
+   :  :- 'SubqueryAlias tenure_base
+   :  :  +- 'UnresolvedQualify ('ROW_NUMBER() windowspecdefinition('rr.accountable_entity_id, 'rr.accountable_entity_type, 'rr.revenue_recognition_schedule_id, 'rr.created_at ASC NULLS FIRST, unspecifiedframe$()) = 1)
+   :  :     +- 'Project ['rr.recognition_type AS revenue_recognition_type#249743, 'rr.accountable_entity_id, 'rr.accountable_entity_type, 'DATE('rrs.start_date) AS start_date#249744, 'DATE('rrs.end_date) AS end_date#249745, (cast('rrs.monetary_components_taxableAmount as double) / 'NULLIF('ROUND((timestampdiff(DAY, 'rrs.start_date, 'rrs.end_date, None) / 30.45)), 0)) AS taxableAmount#249746, 'ROUND((timestampdiff(DAY, 'rrs.start_date, 'rrs.end_date, None) / 30.45)) AS tenure#249747, 'rr.external_reference_type, 'DATE(('rr.created_at + INTERVAL '330' MINUTE)) AS created_at#249748, 'rrs.monetary_components]
+   :  :        +- 'Filter ((('rr.vertical = FURLENCO_RENTAL) AND NOT 'rr.state IN (CANCELLED,INVALIDATED)) AND ('rr.accountable_entity_type IN (ITEM,ATTACHMENT) AND ('rr.created_at >= 2024-06-01)))
+   :  :           +- 'Join LeftOuter, ('rrs.id = 'rr.revenue_recognition_schedule_id)
+   :  :              :- 'SubqueryAlias rr
+   :  :              :  +- 'UnresolvedRelation [furlenco_silver, furbooks_evolve, revenue_recognitions], [], false
+   :  :              +- 'SubqueryAlias rrs
+   :  :                 +- 'UnresolvedRelation [furlenco_silver, furbooks_evolve, revenue_recognition_schedules], [], false
+   :  :- 'SubqueryAlias opening_revenue
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Opening_revenue AS component#249749, 1 AS sort_order#249750, 'COUNT(distinct 'CONCAT('br.accountable_entity_type, ::, 'br.accountable_entity_id)) AS items_count#249751, 'COUNT(distinct 'br.user_id) AS cx_count#249752, 'SUM(cast('br.taxable_amount as float)) AS taxable_revenue#249753]
+   :  :        +- 'Join Inner, (((('br.start_date >= 'm.prev_start) AND ('br.start_date < 'm.m_start)) AND (isnull('br.recognised_at) OR ('br.recognised_at >= 'm.prev_start))) OR ((('br.start_date >= 'm.m_start) AND ('br.recognised_at >= 'm.prev_start)) AND ('br.recognised_at < 'm.m_start)))
+   :  :           :- 'SubqueryAlias br
+   :  :           :  +- 'UnresolvedRelation [furbooks_revenue], [], false
+   :  :           +- 'SubqueryAlias m
+   :  :              +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias mtp1_adjustment
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Minimum tenure charges AS component#249754, 2 AS sort_order#249755, -'COUNT(distinct 'CONCAT('br.accountable_entity_type, ::, 'br.accountable_entity_id)) AS items_count#249756, -'COUNT(distinct 'br.user_id) AS cx_count#249757, -'SUM(cast('br.taxable_amount as float)) AS taxable_revenue#249758]
+   :  :        +- 'Join Inner, ((('br.start_date >= 'm.m_start) AND ('br.recognised_at >= 'm.prev_start)) AND ('br.recognised_at < 'm.m_start))
+   :  :           :- 'SubqueryAlias br
+   :  :           :  +- 'UnresolvedRelation [furbooks_revenue], [], false
+   :  :           +- 'SubqueryAlias m
+   :  :              +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias current_month_mtp
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Current month MTP AS component#249759, 14 AS sort_order#249760, -'COUNT(distinct 'CONCAT('br.accountable_entity_type, ::, 'br.accountable_entity_id)) AS items_count#249761, -'COUNT(distinct 'br.user_id) AS cx_count#249762, -'SUM(cast('br.taxable_amount as float)) AS taxable_revenue#249763]
+   :  :        +- 'Join Inner, ((('br.recognised_at >= 'm.m_start) AND ('br.recognised_at < 'm.m_end)) AND ('br.start_date >= 'm.m_end))
+   :  :           :- 'SubqueryAlias br
+   :  :           :  +- 'UnresolvedRelation [furbooks_revenue], [], false
+   :  :           +- 'SubqueryAlias m
+   :  :              +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias new_deliveries
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, New deliveries (Addition of Cx) AS component#249764, 4 AS sort_order#249765, 'COUNT(distinct 'f.accountable_entity_id) AS items_count#249766, 'COUNT(distinct 'f.fur_id) AS cx_count#249767, 'SUM(cast('f.taxable_amount as float)) AS taxable_revenue#249768]
+   :  :        +- 'Filter ('lower('f.flag_based_on_Ua) = new)
+   :  :           +- 'Join Inner, (('f.activation_date >= 'm.m_start) AND ('f.activation_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias f
+   :  :              :  +- 'UnresolvedRelation [furlenco_analytics, user_defined_tables, rental_acquition_unified], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias upsells
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Upsell (Addition in item count) AS component#249769, 5 AS sort_order#249770, 'COUNT(distinct 'f.accountable_entity_id) AS items_count#249771, 'COUNT(distinct 'f.fur_id) AS cx_count#249772, 'SUM(cast('f.taxable_amount as float)) AS taxable_revenue#249773]
+   :  :        +- 'Filter ('LOWER('f.flag_based_on_Ua) = upsell)
+   :  :           +- 'Join Inner, (('f.activation_date >= 'm.m_start) AND ('f.activation_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias f
+   :  :              :  +- 'UnresolvedRelation [furlenco_analytics, user_defined_tables, rental_acquition_unified], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias churn_pickups_base
+   :  :  +- 'Project ['entity_id, 'entity_type, 'user_ids, 'taxable_amount, 'churn_flag, 'transaction_type, 'payment_date, cast('pickup_date as date) AS pickup_date#249774]
+   :  :     +- 'Filter (('rnk = 1) AND NOT named_struct(entity_id, 'entity_id, entity_type, 'entity_type) IN (list#249775 []))
+   :  :        :  +- 'Project ['accountable_entity_id, 'accountable_entity_type]
+   :  :        :     +- 'Join Inner, ((('br.recognised_at >= 'm.m_start) AND ('br.recognised_at < 'm.m_end)) AND ('br.start_date >= 'm.m_end))
+   :  :        :        :- 'SubqueryAlias br
+   :  :        :        :  +- 'UnresolvedRelation [furbooks_revenue], [], false
+   :  :        :        +- 'SubqueryAlias m
+   :  :        :           +- 'UnresolvedRelation [months], [], false
+   :  :        +- 'UnresolvedRelation [furlenco_analytics, user_defined_tables, rental_churn_query], [], false
+   :  :- 'SubqueryAlias total_pickups
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Total pickup (Return Request Date) AS component#249776, 6 AS sort_order#249777, -'COUNT(distinct 'CONCAT('cp.entity_type, ::, 'cp.entity_id)) AS items_count#249778, -'COUNT(distinct 'cp.user_ids) AS cx_count#249779, -'SUM(cast('cp.taxable_amount as float)) AS taxable_revenue#249780]
+   :  :        +- 'Filter ('cp.transaction_type = return_item)
+   :  :           +- 'Join Inner, (('cp.payment_date >= 'm.m_start) AND ('cp.payment_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias cp
+   :  :              :  +- 'UnresolvedRelation [churn_pickups_base], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias partial_pickups
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Partial pickup (Reduction in item count) AS component#249781, 7 AS sort_order#249782, -'COUNT(distinct 'CONCAT('cp.entity_type, ::, 'cp.entity_id)) AS items_count#249783, 0 AS cx_count#249784, -'SUM(cast('cp.taxable_amount as float)) AS taxable_revenue#249785]
+   :  :        +- 'Filter (('cp.churn_flag = PARTIAL) AND ('cp.transaction_type = return_item))
+   :  :           +- 'Join Inner, (('cp.payment_date >= 'm.m_start) AND ('cp.payment_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias cp
+   :  :              :  +- 'UnresolvedRelation [churn_pickups_base], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias full_pickups
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Full pickup (Reduction of Cx) AS component#249786, 8 AS sort_order#249787, -'COUNT(distinct 'CONCAT('cp.entity_type, ::, 'cp.entity_id)) AS items_count#249788, -'COUNT(distinct 'cp.user_ids) AS cx_count#249789, -'SUM(cast('cp.taxable_amount as float)) AS taxable_revenue#249790]
+   :  :        +- 'Filter (('cp.churn_flag = FULL) AND ('cp.transaction_type = return_item))
+   :  :           +- 'Join Inner, (('cp.payment_date >= 'm.m_start) AND ('cp.payment_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias cp
+   :  :              :  +- 'UnresolvedRelation [churn_pickups_base], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias total_tto
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, TTO (Total - TTO Transaction Date) AS component#249791, 9 AS sort_order#249792, -'COUNT(distinct 'CONCAT('cp.entity_type, ::, 'cp.entity_id)) AS items_count#249793, -'COUNT(distinct 'cp.user_ids) AS cx_count#249794, -'SUM(cast('cp.taxable_amount as float)) AS taxable_revenue#249795]
+   :  :        +- 'Filter ('cp.transaction_type = rent_to_purchase_item)
+   :  :           +- 'Join Inner, (('cp.payment_date >= 'm.m_start) AND ('cp.payment_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias cp
+   :  :              :  +- 'UnresolvedRelation [churn_pickups_base], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias partial_tto
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, TTO - Partial (Reduction in item count) AS component#249796, 10 AS sort_order#249797, -'COUNT(distinct 'CONCAT('cp.entity_type, ::, 'cp.entity_id)) AS items_count#249798, 0 AS cx_count#249799, -'SUM(cast('cp.taxable_amount as float)) AS taxable_revenue#249800]
+   :  :        +- 'Filter (('cp.transaction_type = rent_to_purchase_item) AND ('cp.churn_flag = PARTIAL))
+   :  :           +- 'Join Inner, (('cp.payment_date >= 'm.m_start) AND ('cp.payment_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias cp
+   :  :              :  +- 'UnresolvedRelation [churn_pickups_base], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias full_tto
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, TTO - Full (Reduction of Cx) AS component#249801, 11 AS sort_order#249802, -'COUNT(distinct 'CONCAT('cp.entity_type, ::, 'cp.entity_id)) AS items_count#249803, -'COUNT(distinct 'cp.user_ids) AS cx_count#249804, -'SUM(cast('cp.taxable_amount as float)) AS taxable_revenue#249805]
+   :  :        +- 'Filter (('cp.transaction_type = rent_to_purchase_item) AND ('cp.churn_flag = FULL))
+   :  :           +- 'Join Inner, (('cp.payment_date >= 'm.m_start) AND ('cp.payment_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias cp
+   :  :              :  +- 'UnresolvedRelation [churn_pickups_base], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias swap_base
+   :  :  +- 'Project ['sw.entity_id, 'sw.entity_type, 'se.user_id, 'DATE(('sw.fulfillment_date + INTERVAL '330' MINUTE)) AS fulfillment_date#249810, 'br.taxable_amount, 'DENSE_RANK() windowspecdefinition('sw.entity_id, 'sw.entity_type, 'br.start_date DESC NULLS LAST, unspecifiedframe$()) AS rr_rnk#249811]
+   :  :     +- 'Join LeftOuter, ((('br.accountable_entity_id = 'sw.entity_id) AND ('br.accountable_entity_type = 'sw.entity_type)) AND ('br.start_date <= 'DATE(('sw.fulfillment_date + INTERVAL '330' MINUTE))))
+   :  :        :- 'Join LeftOuter, (('se.id = 'sw.entity_id) AND ('se.entity_type = 'sw.entity_type))
+   :  :        :  :- 'SubqueryAlias sw
+   :  :        :  :  +- 'Union false, false
+   :  :        :  :     :- 'Project ['attachment_id AS entity_id#249806, ATTACHMENT AS entity_type#249807, 'fulfillment_date]
+   :  :        :  :     :  +- 'Filter ((('action = SWAP_OUT) AND ('state = FULFILLED)) AND isnotnull('fulfillment_date))
+   :  :        :  :     :     +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, swap_attachments], [], false
+   :  :        :  :     +- 'Project ['item_id AS entity_id#249808, ITEM AS entity_type#249809, 'fulfillment_date]
+   :  :        :  :        +- 'Filter ((('action = SWAP_OUT) AND ('state = FULFILLED)) AND isnotnull('fulfillment_date))
+   :  :        :  :           +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, swap_items], [], false
+   :  :        :  +- 'SubqueryAlias se
+   :  :        :     +- 'UnresolvedRelation [sms_entity], [], false
+   :  :        +- 'SubqueryAlias br
+   :  :           +- 'UnresolvedRelation [furbooks_revenue], [], false
+   :  :- 'SubqueryAlias swapped_out
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Swapped out AS component#249812, 12 AS sort_order#249813, -'COUNT(distinct 'CONCAT('sb.entity_type, ::, 'sb.entity_id)) AS items_count#249814, 0 AS cx_count#249815, -'SUM(cast('sb.taxable_amount as float)) AS taxable_revenue#249816]
+   :  :        +- 'Filter ('sb.rr_rnk = 1)
+   :  :           +- 'Join Inner, (('sb.fulfillment_date >= 'm.m_start) AND ('sb.fulfillment_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias sb
+   :  :              :  +- 'UnresolvedRelation [swap_base], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias swap_in_base
+   :  :  +- 'Project ['sw.entity_id, 'sw.entity_type, 'se.user_id, 'DATE(('sw.fulfillment_date + INTERVAL '330' MINUTE)) AS fulfillment_date#249821, 'br.taxable_amount, 'DENSE_RANK() windowspecdefinition('sw.entity_id, 'sw.entity_type, 'br.start_date ASC NULLS FIRST, unspecifiedframe$()) AS rr_rnk#249822]
+   :  :     +- 'Join LeftOuter, ((('br.accountable_entity_id = 'sw.entity_id) AND ('br.accountable_entity_type = 'sw.entity_type)) AND ('br.start_date >= 'DATE(('sw.fulfillment_date + INTERVAL '330' MINUTE))))
+   :  :        :- 'Join LeftOuter, (('se.id = 'sw.entity_id) AND ('se.entity_type = 'sw.entity_type))
+   :  :        :  :- 'SubqueryAlias sw
+   :  :        :  :  +- 'Union false, false
+   :  :        :  :     :- 'Project ['attachment_id AS entity_id#249817, ATTACHMENT AS entity_type#249818, 'fulfillment_date]
+   :  :        :  :     :  +- 'Filter ((('action = SWAP_IN) AND ('state = FULFILLED)) AND isnotnull('fulfillment_date))
+   :  :        :  :     :     +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, swap_attachments], [], false
+   :  :        :  :     +- 'Project ['item_id AS entity_id#249819, ITEM AS entity_type#249820, 'fulfillment_date]
+   :  :        :  :        +- 'Filter ((('action = SWAP_IN) AND ('state = FULFILLED)) AND isnotnull('fulfillment_date))
+   :  :        :  :           +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, swap_items], [], false
+   :  :        :  +- 'SubqueryAlias se
+   :  :        :     +- 'UnresolvedRelation [sms_entity], [], false
+   :  :        +- 'SubqueryAlias br
+   :  :           +- 'UnresolvedRelation [furbooks_revenue], [], false
+   :  :- 'SubqueryAlias swapped_in
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Swapped in AS component#249823, 13 AS sort_order#249824, 'COUNT(distinct 'CONCAT('sb.entity_type, ::, 'sb.entity_id)) AS items_count#249825, 0 AS cx_count#249826, 'SUM(cast('sb.taxable_amount as float)) AS taxable_revenue#249827]
+   :  :        +- 'Filter ('sb.rr_rnk = 1)
+   :  :           +- 'Join Inner, (('sb.fulfillment_date >= 'm.m_start) AND ('sb.fulfillment_date < 'm.m_end))
+   :  :              :- 'SubqueryAlias sb
+   :  :              :  +- 'UnresolvedRelation [swap_in_base], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias penalty
+   :  :  +- 'UnresolvedHint BROADCAST, ['m]
+   :  :     +- 'Aggregate ['m.month_num], ['m.month_num, Penalty AS component#249828, 15 AS sort_order#249829, 'COUNT(distinct 'product_entity_id) AS items_count#249830, 'COUNT(distinct 'pl.user_id) AS cx_count#249831, 'SUM(cast('rr.monetary_components_taxableAmount as double)) AS taxable_revenue#249832]
+   :  :        +- 'Filter ((('rr.vertical = FURLENCO_RENTAL) AND NOT 'rr.state IN (CANCELLED,INVALIDATED)) AND ('rr.accountable_entity_type = PENALTY))
+   :  :           +- 'Join Inner, (('DATE(('rr.recognised_at + INTERVAL '330' MINUTE)) >= 'm.m_start) AND ('DATE(('rr.recognised_at + INTERVAL '330' MINUTE)) < 'm.m_end))
+   :  :              :- 'Join Inner, ('rr.accountable_entity_id = 'pl.id)
+   :  :              :  :- 'SubqueryAlias rr
+   :  :              :  :  +- 'UnresolvedRelation [furlenco_silver, furbooks_evolve, revenue_recognitions], [], false
+   :  :              :  +- 'SubqueryAlias pl
+   :  :              :     +- 'UnresolvedRelation [furlenco_silver, order_management_systems_evolve, penalty], [], false
+   :  :              +- 'SubqueryAlias m
+   :  :                 +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias tenure_windowed
+   :  :  +- 'WithWindowDefinition [w=windowspecdefinition('accountable_entity_id, 'accountable_entity_type, 'start_date ASC NULLS FIRST, 'created_at ASC NULLS FIRST, unspecifiedframe$())], false
+   :  :     +- 'Project ['accountable_entity_id, 'accountable_entity_type, 'start_date, 'end_date, 'tenure, 'taxableAmount, 'revenue_recognition_type, unresolvedwindowexpression('LAG('tenure), WindowSpecReference(w)) AS previous_tenure#249833, unresolvedwindowexpression('LAG('start_date), WindowSpecReference(w)) AS previous_start_date#249834, unresolvedwindowexpression('LAG('end_date), WindowSpecReference(w)) AS previous_end_date#249835, unresolvedwindowexpression('LAG('taxableAmount), WindowSpecReference(w)) AS previous_taxableAmount#249836, unresolvedwindowexpression('LAG('revenue_recognition_type), WindowSpecReference(w)) AS previous_recognition_type#249837, 'external_reference_type, 'created_at, 'monetary_components]
+   :  :        +- 'UnresolvedRelation [tenure_base], [], false
+   :  :- 'SubqueryAlias customer_accrual_changes
+   :  :  +- 'Project ['rc.accountable_entity_id, 'rc.accountable_entity_type, 'rc.start_date, 'rc.previous_start_date, 'rc.previous_end_date, 'rc.previous_recognition_type, 'rc.revenue_recognition_type AS current_recognition_type#249838, 'se.user_id, cast('rc.previous_taxableAmount as decimal(10,2)) AS previous_month_revenue#249839, cast('rc.taxableAmount as decimal(10,2)) AS current_month_revenue#249840, (cast('rc.taxableAmount as decimal(10,2)) - cast('rc.previous_taxableAmount as decimal(10,2))) AS revenue_difference#249841, 'rc.created_at, 'm.month_num]
+   :  :     +- 'Filter ((isnotnull('rc.previous_recognition_type) AND NOT ('rc.previous_recognition_type = 'rc.revenue_recognition_type)) AND (('rc.revenue_recognition_type = ACCRUAL) OR ('rc.previous_recognition_type = ACCRUAL)))
+   :  :        +- 'Join Inner, (('rc.start_date >= 'm.m_start) AND ('rc.start_date < 'm.m_end))
+   :  :           :- 'Join LeftOuter, (('se.id = 'rc.accountable_entity_id) AND ('se.entity_type = 'rc.accountable_entity_type))
+   :  :           :  :- 'SubqueryAlias rc
+   :  :           :  :  +- 'UnresolvedRelation [tenure_windowed], [], false
+   :  :           :  +- 'SubqueryAlias se
+   :  :           :     +- 'UnresolvedRelation [sms_entity], [], false
+   :  :           +- 'SubqueryAlias m
+   :  :              +- 'UnresolvedRelation [months], [], false
+   :  :- 'SubqueryAlias accrual_positive
+   :  :  +- 'Aggregate ['month_num], ['month_num, RO (Renewal Overdue) - Positive AS component#249842, 18 AS sort_order#249843, 'COUNT(distinct 'CONCAT('accountable_entity_type, ::, 'accountabl
+
+... [*** WARNING: max output size exceeded, skipping output. ***] ...
+
+toint(start_date#406479) - datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)))) as bigint), 0.9, 10000, 0, 0) AS buf#444215, partial_count(1) AS count#444216L, partial_min(cast(least(datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)), datetoint(start_date#406479)) as bigint)) AS min#444217L, partial_max(cast(greatest(datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)), datetoint(start_date#406479)) as bigint)) AS max#444218L], output=[buf#444215, count#444216L, min#444217L, max#444218L])
+                                                                                                               +- PhotonSample 0.0, 0.1, false
+                                                                                                                  +- PhotonProject [recognised_at#406484, start_date#406479]
+                                                                                                                     +- PhotonScan parquet furlenco_silver.furbooks_evolve.revenue_recognitions[accountable_entity_type#406478,start_date#406479,state#406481,vertical#406482,recognised_at#406484] DataFilters: [isnotnull(start_date#406479), isnotnull(recognised_at#406484), isnotnull(vertical#406482), isnot..., DictionaryFilters: [(vertical#406482 = FURLENCO_RENTAL), accountable_entity_type#406478 IN (ITEM,ATTACHMENT), NOT st..., Format: parquet, Location: PreparedDeltaFileIndex(1 paths)[s3://furlenco-databricks-datasource/__unitystorage/catalogs/53a0e..., OptionalDataFilters: [], PartitionFilters: [], ReadSchema: struct<accountable_entity_type:string,start_date:date,state:string,vertical:string,recognised_at:..., RequiredDataFilters: [isnotnull(start_date#406479), isnotnull(recognised_at#406484), isnotnull(vertical#406482), isnot...
+                                                                                                      :     :  +- Subquery subquery#440019, [id=#294893]
+                                                                                                      :     :     +- AdaptiveSparkPlan isFinalPlan=false
+                                                                                       +- == Initial Plan ==
+                                                                                          ColumnarToRow
+                                                                                          +- PhotonResultStage
+                                                                                             +- PhotonProject [if ((binSize#435288L > 0)) binSize#435288L else if ((((max#435294L - min#435292L) div (count#435290L * 10)) > 0)) ((max#435294L - min#435292L) div (count#435290L * 10)) else 9223372036854775807 AS binSize#435295L]
+                                                                                                +- PhotonAgg(limit=None, keys=[], functions=[finalmerge_percentile_approx(merge buf#444215) AS percentile_approx(abs((datetoint(start_date) - datetoint(recognised_at + INTERVAL '330' MINUTE))), 0.9, 10000)#435287L, finalmerge_count(merge count#444216L) AS count(1)#435289L, finalmerge_min(merge min#444217L) AS min(least(datetoint(recognised_at + INTERVAL '330' MINUTE), datetoint(start_date)))#435291L, finalmerge_max(merge max#444218L) AS max(greatest(datetoint(recognised_at + INTERVAL '330' MINUTE), datetoint(start_date)))#435293L], output=[binSize#435288L, count#435290L, min#435292L, max#435294L])
+                                                                                                   +- PhotonShuffleExchangeSource
+                                                                                                      +- PhotonShuffleMapStage ENSURE_REQUIREMENTS, [id=#294872]
+                                                                                                         +- PhotonShuffleExchangeSink SinglePartition
+                                                                                                            +- PhotonAgg(limit=None, keys=[], functions=[partial_percentile_approx(cast(abs((datetoint(start_date#406479) - datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)))) as bigint), 0.9, 10000, 0, 0) AS buf#444215, partial_count(1) AS count#444216L, partial_min(cast(least(datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)), datetoint(start_date#406479)) as bigint)) AS min#444217L, partial_max(cast(greatest(datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)), datetoint(start_date#406479)) as bigint)) AS max#444218L], output=[buf#444215, count#444216L, min#444217L, max#444218L])
+                                                                                                               +- PhotonSample 0.0, 0.1, false
+                                                                                                                  +- PhotonProject [recognised_at#406484, start_date#406479]
+                                                                                                                     +- PhotonScan parquet furlenco_silver.furbooks_evolve.revenue_recognitions[accountable_entity_type#406478,start_date#406479,state#406481,vertical#406482,recognised_at#406484] DataFilters: [isnotnull(start_date#406479), isnotnull(recognised_at#406484), isnotnull(vertical#406482), isnot..., DictionaryFilters: [(vertical#406482 = FURLENCO_RENTAL), accountable_entity_type#406478 IN (ITEM,ATTACHMENT), NOT st..., Format: parquet, Location: PreparedDeltaFileIndex(1 paths)[s3://furlenco-databricks-datasource/__unitystorage/catalogs/53a0e..., OptionalDataFilters: [], PartitionFilters: [], ReadSchema: struct<accountable_entity_type:string,start_date:date,state:string,vertical:string,recognised_at:..., RequiredDataFilters: [isnotnull(start_date#406479), isnotnull(recognised_at#406484), isnotnull(vertical#406482), isnot...
+                                                                                                      :     +- PhotonProject [start_date#433164, cast(recognised_at#433169 + INTERVAL '330' MINUTE as date) AS recognised_at#251558, monetary_components_taxableAmount#433192 AS taxable_amount#251561]
+                                                                                                      :        +- PhotonShuffledHashJoin [accountable_entity_id#433162L, accountable_entity_type#433163], [id#252410L, entity_type#252411], LeftOuter, BuildRight
+                                                                                                      :           :- PhotonShuffleExchangeSource
+                                                                                                      :           :  +- PhotonShuffleMapStage ENSURE_REQUIREMENTS, [id=#303419]
+                                                                                                      :           :     +- PhotonShuffleExchangeSink hashpartitioning(accountable_entity_id#433162L, accountable_entity_type#433163, 16)
+                                                                                                      :           :        +- PhotonProject [accountable_entity_id#433162L, accountable_entity_type#433163, start_date#433164, recognised_at#433169, monetary_components_taxableamount#433192]
+                                                                                                      :           :           +- PhotonShuffledHashJoin [revenue_recognition_schedule_id#433161L], [id#433248L], LeftOuter, BuildRight
+                                                                                                      :           :              :- PhotonShuffleExchangeSource
+                                                                                                      :           :              :  +- PhotonShuffleMapStage ENSURE_REQUIREMENTS, [id=#303403]
+                                                                                                      :           :              :     +- PhotonShuffleExchangeSink hashpartitioning(revenue_recognition_schedule_id#433161L, 16)
+                                                                                                      :           :              :        +- PhotonProject [revenue_recognition_schedule_id#433161L, accountable_entity_id#433162L, accountable_entity_type#433163, start_date#433164, recognised_at#433169, monetary_components_taxableamount#433192]
+                                                                                                      :           :              :           +- PhotonScan parquet furlenco_silver.furbooks_evolve.revenue_recognitions[revenue_recognition_schedule_id#433161L,accountable_entity_id#433162L,accountable_entity_type#433163,start_date#433164,state#433166,vertical#433167,recognised_at#433169,monetary_components_taxableamount#433192] DataFilters: [isnotnull(start_date#433164), isnotnull(recognised_at#433169), isnotnull(vertical#433167), isnot..., DictionaryFilters: [(vertical#433167 = FURLENCO_RENTAL), accountable_entity_type#433163 IN (ITEM,ATTACHMENT), NOT st..., Format: parquet, Location: PreparedDeltaFileIndex(1 paths)[s3://furlenco-databricks-datasource/__unitystorage/catalogs/53a0e..., OptionalDataFilters: [], PartitionFilters: [], ReadSchema: struct<revenue_recognition_schedule_id:bigint,accountable_entity_id:bigint,accountable_entity_typ..., RequiredDataFilters: [isnotnull(start_date#433164), isnotnull(recognised_at#433169), isnotnull(vertical#433167), isnot...
+                                                                                                      :           :              +- PhotonShuffleExchangeSource
+                                                                                                      :           :                 +- PhotonShuffleMapStage ENSURE_REQUIREMENTS, [id=#303409]
+                                                                                                      :           :                    +- PhotonShuffleExchangeSink hashpartitioning(id#433248L, 16)
+                                                                                                      :           :                       +- PhotonScan parquet furlenco_silver.furbooks_evolve.revenue_recognition_schedules[id#433248L] DataFilters: [isnotnull(id#433248L)], DictionaryFilters: [], Format: parquet, Location: PreparedDeltaFileIndex(1 paths)[s3://furlenco-databricks-datasource/__unitystorage/catalogs/53a0e..., OptionalDataFilters: [], PartitionFilters: [], ReadSchema: struct<id:bigint>, RequiredDataFilters: [isnotnull(id#433248L)]
+                                                                                                      :           +- PhotonShuffleExchangeSource
+                                                                                                      :              +- PhotonShuffleMapStage ENSURE_REQUIREMENTS, [id=#303433]
+                                                                                                      :                 +- PhotonShuffleExchangeSink hashpartitioning(id#252410L, entity_type#252411, 16)
+                                                                                                      :                    +- PhotonUnion Generic
+                                                                                                      :                       :- PhotonProject [id#250294L AS id#252410L, ITEM AS entity_type#252411]
+                                                                                                      :                       :  +- PhotonScan parquet furlenco_silver.order_management_systems_evolve.items[id#250294L,state#250300] DataFilters: [isnotnull(id#250294L), isnotnull(state#250300), NOT (state#250300 = CANCELLED)], DictionaryFilters: [NOT (state#250300 = CANCELLED)], Format: parquet, Location: PreparedDeltaFileIndex(1 paths)[s3://furlenco-databricks-datasource/__unitystorage/catalogs/53a0e..., OptionalDataFilters: [], PartitionFilters: [], ReadSchema: struct<id:bigint,state:string>, RequiredDataFilters: [isnotnull(id#250294L), isnotnull(state#250300), NOT (state#250300 = CANCELLED)]
+                                                                                                      :                       +- PhotonProject [id#250490L, ATTACHMENT AS entity_type#439827]
+                                                                                                      :                          +- PhotonScan parquet furlenco_silver.order_management_systems_evolve.attachments[id#250490L,state#250496] DataFilters: [isnotnull(id#250490L), isnotnull(state#250496), NOT (state#250496 = CANCELLED)], DictionaryFilters: [NOT (state#250496 = CANCELLED)], Format: parquet, Location: PreparedDeltaFileIndex(1 paths)[s3://furlenco-databricks-datasource/__unitystorage/catalogs/53a0e..., OptionalDataFilters: [], PartitionFilters: [], ReadSchema: struct<id:bigint,state:string>, RequiredDataFilters: [isnotnull(id#250490L), isnotnull(state#250496), NOT (state#250496 = CANCELLED)]
+                                                                                                      +- PhotonShuffleExchangeSource
+                                                                                                         +- PhotonShuffleMapStage EXECUTOR_BROADCAST, [id=#303458]
+                                                                                                            +- PhotonShuffleExchangeSink SinglePartition
+                                                                                                               +- PhotonProject [month_num#251449, m_start#251450, prev_start#251452, (cast(datetoint(m_start#251450) as bigint) div CEIL(Subquery subquery#440019, [id=#294893])) AS pointBinId#440022L]
+                                                                                                                  :  +- Subquery subquery#440019, [id=#294893]
+                                                                                                                  :     +- AdaptiveSparkPlan isFinalPlan=false
+                                                                                             +- == Initial Plan ==
+                                                                                                ColumnarToRow
+                                                                                                +- PhotonResultStage
+                                                                                                   +- PhotonProject [if ((binSize#435288L > 0)) binSize#435288L else if ((((max#435294L - min#435292L) div (count#435290L * 10)) > 0)) ((max#435294L - min#435292L) div (count#435290L * 10)) else 9223372036854775807 AS binSize#435295L]
+                                                                                                      +- PhotonAgg(limit=None, keys=[], functions=[finalmerge_percentile_approx(merge buf#444215) AS percentile_approx(abs((datetoint(start_date) - datetoint(recognised_at + INTERVAL '330' MINUTE))), 0.9, 10000)#435287L, finalmerge_count(merge count#444216L) AS count(1)#435289L, finalmerge_min(merge min#444217L) AS min(least(datetoint(recognised_at + INTERVAL '330' MINUTE), datetoint(start_date)))#435291L, finalmerge_max(merge max#444218L) AS max(greatest(datetoint(recognised_at + INTERVAL '330' MINUTE), datetoint(start_date)))#435293L], output=[binSize#435288L, count#435290L, min#435292L, max#435294L])
+                                                                                                         +- PhotonShuffleExchangeSource
+                                                                                                            +- PhotonShuffleMapStage ENSURE_REQUIREMENTS, [id=#294872]
+                                                                                                               +- PhotonShuffleExchangeSink SinglePartition
+                                                                                                                  +- PhotonAgg(limit=None, keys=[], functions=[partial_percentile_approx(cast(abs((datetoint(start_date#406479) - datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)))) as bigint), 0.9, 10000, 0, 0) AS buf#444215, partial_count(1) AS count#444216L, partial_min(cast(least(datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)), datetoint(start_date#406479)) as bigint)) AS min#444217L, partial_max(cast(greatest(datetoint(cast(recognised_at#406484 + INTERVAL '330' MINUTE as date)), datetoint(start_date#406479)) as bigint)) AS max#444218L], output=[buf#444215, count#444216L, min#444217L, max#444218L])
+                                                                                                                     +- PhotonSample 0.0, 0.1, false
+                                                                                                                        +- PhotonProject [recognised_at#406484, start_date#406479]
+                                                                                                                           +- PhotonScan parquet furlenco_silver.furbooks_evolve.revenue_recognitions[accountable_entity_type#406478,start_date#406479,state#406481,vertical#406482,recognised_at#406484] DataFilters: [isnotnull(start_date#406479), isnotnull(recognised_at#406484), isnotnull(vertical#406482), isnot..., DictionaryFilters: [(vertical#406482 = FURLENCO_RENTAL), accountable_entity_type#406478 IN (ITEM,ATTACHMENT), NOT st..., Format: parquet, Location: PreparedDeltaFileIndex(1 paths)[s3://furlenco-databricks-datasource/__unitystorage/catalogs/53a0e..., OptionalDataFilters: [], PartitionFilters: [], ReadSchema: struct<accountable_entity_type:string,start_date:date,state:string,vertical:string,recognised_at:..., RequiredDataFilters: [isnotnull(start_date#406479), isnotnull(recognised_at#406484), isnotnull(vertical#406482), isnot...
+                                                                                                                  +- PhotonUnion Generic
+                                                                                                                     :- PhotonProject [1 AS month_num#251449, 2026-01-01 AS m_start#251450, 2025-12-01 AS prev_start#251452]
+                                                                                                                     :  +- PhotonRowToColumnar
+                                                                                                                     :     +- Scan OneRowRelation[]
+                                                                                                                     +- PhotonProject [2 AS month_num#439830, 2026-02-01 AS m_start#439831, 2026-01-01 AS prev_start#439833]
+                                                                                                                        +- PhotonRowToColumnar
+                                                                                                                           +- Scan OneRowRelation[]
+                     +- PhotonRowToColumnar
+                        +- Scan OneRowRelation[]
+
+== Photon Explanation ==
+Photon does not fully support the query because:
+		Unsupported node: BroadcastExchange IdentityBroadcastMode, [plan_id=312349].
+
+Reference node:
+	BroadcastExchange IdentityBroadcastMode, [plan_id=316368]
+
+Photon does not fully support the query because:
+		Photon does not support LeftAnti broadcast join with build side BuildLeft. If possible, try a different join strategy or rewrite the query.
+
+Reference node:
+	BroadcastNestedLoopJoin BuildLeft, LeftAnti, (((entity_id#406454L = accountable_entity_id#406477L) OR isnull((entity_id#406454L = accountable_entity_id#406477L))) AND ((entity_type#406455 = accountable_entity_type#406478) OR isnull((entity_type#406455 = accountable_entity_type#406478)))), false
+
+Photon does not fully support the query because:
+		Unsupported node: BroadcastExchange IdentityBroadcastMode, [plan_id=312444].
+
+Reference node:
+	BroadcastExchange IdentityBroadcastMode, [plan_id=316384]
+
+Photon does not fully support the query because:
+		Photon does not support LeftAnti broadcast join with build side BuildLeft. If possible, try a different join strategy or rewrite the query.
+
+Reference node:
+	BroadcastNestedLoopJoin BuildLeft, LeftAnti, (((entity_id#406599L = accountable_entity_id#406622L) OR isnull((entity_id#406599L = accountable_entity_id#406622L))) AND ((entity_type#406600 = accountable_entity_type#406623) OR isnull((entity_type#406600 = accountable_entity_type#406623)))), false
+
+Photon does not fully support the query because:
+		Unsupported node: BroadcastExchange IdentityBroadcastMode, [plan_id=312538].
+
+Reference node:
+	BroadcastExchange IdentityBroadcastMode, [plan_id=316399]
+
+Photon does not fully support the query because:
+		Photon does not support LeftAnti broadcast join with build side BuildLeft. If possible, try a different join strategy or rewrite the query.
+
+Reference node:
+	BroadcastNestedLoopJoin BuildLeft, LeftAnti, (((entity_id#406744L = accountable_entity_id#406767L) OR isnull((entity_id#406744L = accountable_entity_id#406767L))) AND ((entity_type#406745 = accountable_entity_type#406768) OR isnull((entity_type#406745 = accountable_entity_type#406768)))), false
+
+Photon does not fully support the query because:
+		Unsupported node: BroadcastExchange IdentityBroadcastMode, [plan_id=312633].
+
+Reference node:
+	BroadcastExchange IdentityBroadcastMode, [plan_id=316415]
+
+Photon does not fully support the query because:
+		Photon does not support LeftAnti broadcast join with build side BuildLeft. If possible, try a different join strategy or rewrite the query.
+
+Reference node:
+	BroadcastNestedLoopJoin BuildLeft, LeftAnti, (((entity_id#406889L = accountable_entity_id#406912L) OR isnull((entity_id#406889L = accountable_entity_id#406912L))) AND ((entity_type#406890 = accountable_entity_type#406913) OR isnull((entity_type#406890 = accountable_entity_type#406913)))), false
+
+Photon does not fully support the query because:
+... 47 more fields
+== Optimizer Statistics (table names per statistics state) ==
+  missing = 
+  partial = 
+  full    = attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, attachments, discounts, discounts, discounts, discounts, discounts, discounts, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, items, penalty, penalty, rental_acquition_unified, rental_acquition_unified, rental_acquition_unified, rental_acquition_unified, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, rental_churn_query, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognition_schedules, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, revenue_recognitions, swap_attachments, swap_attachments, swap_attachments, swap_attachments, swap_items, swap_items, swap_items, swap_items, value_added_services, value_added_services
