@@ -13,31 +13,6 @@ WITH sms_entity AS (
     WHERE state <> 'CANCELLED'
 )
 
--- TTO completion date per entity — used to synthesize recognised_at for post-TTO future cycles
-, tto_entity_dates AS (
-    SELECT
-        rtp_i.item_id                                                   AS entity_id,
-        'ITEM'                                                          AS entity_type,
-        DATE(MAX(rto.created_at) + INTERVAL '330 minutes')             AS tto_date
-    FROM furlenco_silver.order_management_systems_evolve.rent_to_purchase_items rtp_i
-    JOIN furlenco_silver.order_management_systems_evolve.rent_to_purchase_orders rto
-        ON rto.id = rtp_i.rent_to_purchase_order_id
-    WHERE INSTR(LOWER(CAST(rtp_i.payment_details AS STRING)), 'paid') > 0
-      AND rto.state <> 'CANCELLED'
-    GROUP BY rtp_i.item_id
-    UNION ALL
-    SELECT
-        rtp_a.attachment_id                                             AS entity_id,
-        'ATTACHMENT'                                                    AS entity_type,
-        DATE(MAX(rto.created_at) + INTERVAL '330 minutes')             AS tto_date
-    FROM furlenco_silver.order_management_systems_evolve.rent_to_purchase_attachments rtp_a
-    JOIN furlenco_silver.order_management_systems_evolve.rent_to_purchase_orders rto
-        ON rto.id = rtp_a.rent_to_purchase_order_id
-    WHERE INSTR(LOWER(CAST(rtp_a.payment_details AS STRING)), 'paid') > 0
-      AND rto.state <> 'CANCELLED'
-    GROUP BY rtp_a.attachment_id
-)
-
 -- ============================================================================
 -- SECTION 1: UNIFIED BASE — single scan of revenue_recognitions + schedules
 -- Dead columns pruned: id, to_be_recognised_on, sched_postTaxAmount removed.
@@ -99,20 +74,11 @@ SELECT
     DATE(rb.rr_start_date)                                   AS start_date,
     rb.recognised_at_ist                                     AS recognised_at,
     rb.monetary_components_taxableAmount                     AS taxable_amount,
-    se.user_id,
-    CASE
-        WHEN DATE(rb.rr_start_date) > tto.tto_date              THEN tto.tto_date
-        WHEN rb.recognised_at_ist > tto.tto_date
-         AND tto.tto_date IS NOT NULL                            THEN tto.tto_date
-        ELSE rb.recognised_at_ist
-    END                                                      AS synthetic_recognised_at_ist
+    se.user_id
 FROM rr_item_attach rb
     LEFT JOIN sms_entity se
 ON se.id          = rb.accountable_entity_id
     AND se.entity_type = rb.accountable_entity_type
-    LEFT JOIN tto_entity_dates tto
-        ON  tto.entity_id   = rb.accountable_entity_id
-        AND tto.entity_type = rb.accountable_entity_type
     )
 
 -- ============================================================================
@@ -185,8 +151,7 @@ SELECT /*+ BROADCAST(m) */
     CASE WHEN br.start_date >= m.m_start
     AND br.recognised_at >= m.prev_start AND br.recognised_at < m.m_start
     THEN TRUE ELSE FALSE END                                                            AS is_s1_2,
-    CASE WHEN br.synthetic_recognised_at_ist >= m.m_start
-    AND br.synthetic_recognised_at_ist <= m.m_end
+    CASE WHEN br.recognised_at >= m.m_start AND br.recognised_at <= m.m_end
     AND br.start_date > m.m_end
     THEN TRUE ELSE FALSE END                                                            AS is_current_mtp
 FROM furbooks_revenue br
@@ -204,10 +169,10 @@ ON (
     AND br.recognised_at <  m.m_start
     )
     OR
-    -- Current month MTP (synthetic date handles TTO — recognised_at is not updated by Furbooks on TTO)
-    (   br.synthetic_recognised_at_ist >= m.m_start
-    AND br.synthetic_recognised_at_ist <=  m.m_end
-    AND br.start_date                  > m.m_end
+    -- Current month MTP
+    (   br.recognised_at >= m.m_start
+    AND br.recognised_at <=  m.m_end
+    AND br.start_date    > m.m_end
     )
     )
     )
@@ -713,6 +678,58 @@ FROM vas_detail
 GROUP BY month_num, vas_category
     )
 
+-- ----------------------------------------------------------------------------
+-- VAS Bridge: prev month vs current month, all categories combined.
+-- Powers the VAS adjustment in adj_opening_row.
+-- ----------------------------------------------------------------------------
+    , vas_bridge_detail AS (
+SELECT /*+ BROADCAST(m) */
+    rb.accountable_entity_id,
+    vas_user.user_id,
+    CAST(rb.monetary_components_taxableAmount AS DOUBLE)           AS taxable_amount,
+    m.month_num,
+    CASE
+        WHEN DATE(rb.rr_start_date) >= m.prev_start
+         AND DATE(rb.rr_start_date) <  m.m_start THEN 'prev'
+        ELSE 'curr'
+    END AS period
+FROM rr_vas rb
+    INNER JOIN months m ON (
+        (DATE(rb.rr_start_date) >= m.prev_start AND DATE(rb.rr_start_date) <  m.m_start)
+     OR (DATE(rb.rr_start_date) >= m.m_start   AND DATE(rb.rr_start_date) <= m.m_end)
+    )
+    LEFT JOIN (
+        SELECT vas.id, se.user_id
+        FROM furlenco_silver.order_management_systems_evolve.Value_Added_Services AS vas
+        JOIN sms_entity se ON vas.entity_type = se.entity_type AND vas.entity_id = se.id
+        WHERE vas.state <> 'CANCELLED'
+    ) AS vas_user ON rb.accountable_entity_id = vas_user.id
+    )
+
+    , vas_bridge AS (
+SELECT
+    month_num,
+    COUNT(DISTINCT CASE WHEN period = 'prev' THEN accountable_entity_id END)          AS prev_items,
+    COUNT(DISTINCT CASE WHEN period = 'prev' THEN user_id END)                        AS prev_cx,
+    SUM(CASE WHEN period = 'prev' THEN taxable_amount::DECIMAL(10,2) ELSE 0 END)      AS prev_rev,
+    COUNT(DISTINCT CASE WHEN period = 'curr' THEN accountable_entity_id END)          AS curr_items,
+    COUNT(DISTINCT CASE WHEN period = 'curr' THEN user_id END)                        AS curr_cx,
+    SUM(CASE WHEN period = 'curr' THEN taxable_amount::DECIMAL(10,2) ELSE 0 END)      AS curr_rev
+FROM vas_bridge_detail
+GROUP BY month_num
+    )
+
+    , vas_bridge_wide AS (
+SELECT
+    MAX(CASE WHEN month_num = 1 THEN curr_items - prev_items END)   AS m1_vas_items,
+    MAX(CASE WHEN month_num = 1 THEN curr_cx    - prev_cx    END)   AS m1_vas_cx,
+    MAX(CASE WHEN month_num = 1 THEN curr_rev   - prev_rev   END)   AS m1_vas_rev,
+    MAX(CASE WHEN month_num = 2 THEN curr_items - prev_items END)   AS m2_vas_items,
+    MAX(CASE WHEN month_num = 2 THEN curr_cx    - prev_cx    END)   AS m2_vas_cx,
+    MAX(CASE WHEN month_num = 2 THEN curr_rev   - prev_rev   END)   AS m2_vas_rev
+FROM vas_bridge
+    )
+
 -- ============================================================================
 -- SECTION 6: ASSEMBLY AND PIVOT
 -- ============================================================================
@@ -776,24 +793,25 @@ WHERE component = 'Opening_revenue' AND sort_order = 1
     , adj_opening_row AS (
 SELECT
     SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
-    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
-    THEN COALESCE(m1_items, 0) ELSE 0 END) AS m1_items,
+             OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+             THEN COALESCE(m1_items, 0) ELSE 0 END) + COALESCE(vb.m1_vas_items, 0) AS m1_items,
     SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
-    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
-    THEN COALESCE(m1_cx,    0) ELSE 0 END) AS m1_cx,
+             OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+             THEN COALESCE(m1_cx,    0) ELSE 0 END) + COALESCE(vb.m1_vas_cx,    0) AS m1_cx,
     SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
-    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
-    THEN COALESCE(m1_rev,   0) ELSE 0 END) AS m1_rev,
+             OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+             THEN COALESCE(m1_rev,   0) ELSE 0 END) + COALESCE(vb.m1_vas_rev,   0) AS m1_rev,
     SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
-    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
-    THEN COALESCE(m2_items, 0) ELSE 0 END) AS m2_items,
+             OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+             THEN COALESCE(m2_items, 0) ELSE 0 END) + COALESCE(vb.m2_vas_items, 0) AS m2_items,
     SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
-    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
-    THEN COALESCE(m2_cx,    0) ELSE 0 END) AS m2_cx,
+             OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+             THEN COALESCE(m2_cx,    0) ELSE 0 END) + COALESCE(vb.m2_vas_cx,    0) AS m2_cx,
     SUM(CASE WHEN (component = 'Opening_revenue'        AND sort_order = 1)
-    OR  (component = 'Minimum tenure charges' AND sort_order = 2)
-    THEN COALESCE(m2_rev,   0) ELSE 0 END) AS m2_rev
+             OR  (component = 'Minimum tenure charges' AND sort_order = 2)
+             THEN COALESCE(m2_rev,   0) ELSE 0 END) + COALESCE(vb.m2_vas_rev,   0) AS m2_rev
 FROM base_wide
+CROSS JOIN vas_bridge_wide vb
 WHERE (component = 'Opening_revenue'        AND sort_order = 1)
    OR (component = 'Minimum tenure charges' AND sort_order = 2)
     )

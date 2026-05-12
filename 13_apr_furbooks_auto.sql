@@ -13,31 +13,6 @@ WITH sms_entity AS (
     WHERE state <> 'CANCELLED'
 )
 
--- TTO completion date per entity — used to synthesize recognised_at for post-TTO future cycles
-, tto_entity_dates AS (
-    SELECT
-        rtp_i.item_id                                                   AS entity_id,
-        'ITEM'                                                          AS entity_type,
-        DATE(MAX(rto.created_at) + INTERVAL '330 minutes')             AS tto_date
-    FROM furlenco_silver.order_management_systems_evolve.rent_to_purchase_items rtp_i
-    JOIN furlenco_silver.order_management_systems_evolve.rent_to_purchase_orders rto
-        ON rto.id = rtp_i.rent_to_purchase_order_id
-    WHERE INSTR(LOWER(CAST(rtp_i.payment_details AS STRING)), 'paid') > 0
-      AND rto.state <> 'CANCELLED'
-    GROUP BY rtp_i.item_id
-    UNION ALL
-    SELECT
-        rtp_a.attachment_id                                             AS entity_id,
-        'ATTACHMENT'                                                    AS entity_type,
-        DATE(MAX(rto.created_at) + INTERVAL '330 minutes')             AS tto_date
-    FROM furlenco_silver.order_management_systems_evolve.rent_to_purchase_attachments rtp_a
-    JOIN furlenco_silver.order_management_systems_evolve.rent_to_purchase_orders rto
-        ON rto.id = rtp_a.rent_to_purchase_order_id
-    WHERE INSTR(LOWER(CAST(rtp_a.payment_details AS STRING)), 'paid') > 0
-      AND rto.state <> 'CANCELLED'
-    GROUP BY rtp_a.attachment_id
-)
-
 -- ============================================================================
 -- SECTION 1: UNIFIED BASE — single scan of revenue_recognitions + schedules
 -- Dead columns pruned: id, to_be_recognised_on, sched_postTaxAmount removed.
@@ -69,10 +44,8 @@ FROM furlenco_silver.furbooks_evolve.revenue_recognitions AS rr
 ON rrs.id = rr.revenue_recognition_schedule_id
 WHERE rr.vertical = 'FURLENCO_RENTAL'
   AND rr.state NOT IN ('CANCELLED', 'INVALIDATED')
---   AND rr.start_date >= ADD_MONTHS(CAST(:month1_start AS DATE), -15)
--- AND rr.accountable_entity_id = 2192317
-
-
+  AND rr.deleted_at IS NULL
+  AND rr.start_date >= ADD_MONTHS(CAST(:month1_start AS DATE), -3)
     )
 
 -- Entity-type splits: avoid re-scanning rr_base 7 times
@@ -99,20 +72,11 @@ SELECT
     DATE(rb.rr_start_date)                                   AS start_date,
     rb.recognised_at_ist                                     AS recognised_at,
     rb.monetary_components_taxableAmount                     AS taxable_amount,
-    se.user_id,
-    CASE
-        WHEN DATE(rb.rr_start_date) > tto.tto_date              THEN tto.tto_date
-        WHEN rb.recognised_at_ist > tto.tto_date
-         AND tto.tto_date IS NOT NULL                            THEN tto.tto_date
-        ELSE rb.recognised_at_ist
-    END                                                      AS synthetic_recognised_at_ist
+    se.user_id
 FROM rr_item_attach rb
     LEFT JOIN sms_entity se
 ON se.id          = rb.accountable_entity_id
     AND se.entity_type = rb.accountable_entity_type
-    LEFT JOIN tto_entity_dates tto
-        ON  tto.entity_id   = rb.accountable_entity_id
-        AND tto.entity_type = rb.accountable_entity_type
     )
 
 -- ============================================================================
@@ -154,7 +118,7 @@ SELECT
     rb.created_at_ist                                                          AS created_at,
     rb.sched_monetary_components                                               AS monetary_components
 FROM rr_item_attach rb
-WHERE 1=1
+WHERE rb.created_at >= '2024-06-01'
     QUALIFY ROW_NUMBER() OVER (
     PARTITION BY rb.accountable_entity_id, rb.accountable_entity_type, rb.revenue_recognition_schedule_id
     ORDER BY rb.created_at ASC
@@ -180,14 +144,13 @@ SELECT /*+ BROADCAST(m) */
     br.taxable_amount,
     -- Classify into component buckets
     CASE WHEN br.start_date >= m.prev_start AND br.start_date < m.m_start
-    AND (br.recognised_at IS NULL OR br.recognised_at >= br.start_date)
+    AND (br.recognised_at IS NULL OR br.recognised_at >= m.prev_start)
     THEN TRUE ELSE FALSE END                                                            AS is_s1_1,
     CASE WHEN br.start_date >= m.m_start
     AND br.recognised_at >= m.prev_start AND br.recognised_at < m.m_start
     THEN TRUE ELSE FALSE END                                                            AS is_s1_2,
-    CASE WHEN br.synthetic_recognised_at_ist >= m.m_start
-    AND br.synthetic_recognised_at_ist <= m.m_end
-    AND br.start_date > m.m_end
+    CASE WHEN br.recognised_at >= m.m_start AND br.recognised_at < m.m_end
+    AND br.start_date >= m.m_end
     THEN TRUE ELSE FALSE END                                                            AS is_current_mtp
 FROM furbooks_revenue br
     INNER JOIN months m
@@ -195,7 +158,7 @@ ON (
     -- S1.1: Normal cycles
     (    br.start_date    >= m.prev_start
     AND br.start_date    <  m.m_start
-    AND (br.recognised_at IS NULL OR br.recognised_at >= br.start_date)
+    AND (br.recognised_at IS NULL OR br.recognised_at >= m.prev_start)
     )
     OR
     -- S1.2: MTP cycles
@@ -204,10 +167,10 @@ ON (
     AND br.recognised_at <  m.m_start
     )
     OR
-    -- Current month MTP (synthetic date handles TTO — recognised_at is not updated by Furbooks on TTO)
-    (   br.synthetic_recognised_at_ist >= m.m_start
-    AND br.synthetic_recognised_at_ist <=  m.m_end
-    AND br.start_date                  > m.m_end
+    -- Current month MTP
+    (   br.recognised_at >= m.m_start
+    AND br.recognised_at <  m.m_end
+    AND br.start_date    >= m.m_end
     )
     )
     )
@@ -219,17 +182,17 @@ SELECT month_num,
     COUNT(DISTINCT CASE WHEN is_s1_1 OR is_s1_2
     THEN CONCAT(accountable_entity_type, '::', accountable_entity_id) END)              AS op_items,
     COUNT(DISTINCT CASE WHEN is_s1_1 OR is_s1_2 THEN user_id END)                           AS op_cx,
-    SUM(CASE WHEN is_s1_1 OR is_s1_2 THEN taxable_amount::DECIMAL(10,2) ELSE 0 END)                 AS op_rev,
+    SUM(CASE WHEN is_s1_1 OR is_s1_2 THEN taxable_amount::float ELSE 0 END)                 AS op_rev,
     -- Component 2: MTP Adjustment (S1.2 only, negated)
     -COUNT(DISTINCT CASE WHEN is_s1_2
     THEN CONCAT(accountable_entity_type, '::', accountable_entity_id) END)              AS mtp_adj_items,
     -COUNT(DISTINCT CASE WHEN is_s1_2 THEN user_id END)                                     AS mtp_adj_cx,
-    -SUM(CASE WHEN is_s1_2 THEN taxable_amount::DECIMAL(10,2) ELSE 0 END)                           AS mtp_adj_rev,
+    -SUM(CASE WHEN is_s1_2 THEN taxable_amount::float ELSE 0 END)                           AS mtp_adj_rev,
     -- Component 14: Current Month MTP (negated)
     -COUNT(DISTINCT CASE WHEN is_current_mtp
     THEN CONCAT(accountable_entity_type, '::', accountable_entity_id) END)              AS cmtp_items,
     -COUNT(DISTINCT CASE WHEN is_current_mtp THEN user_id END)                               AS cmtp_cx,
-    -SUM(CASE WHEN is_current_mtp THEN taxable_amount::DECIMAL(10,2) ELSE 0 END)                     AS cmtp_rev
+    -SUM(CASE WHEN is_current_mtp THEN taxable_amount::float ELSE 0 END)                     AS cmtp_rev
 FROM furbooks_classified
 GROUP BY month_num
     )
@@ -249,24 +212,23 @@ WHERE is_current_mtp
 SELECT /*+ BROADCAST(m) */
     m.month_num,
     f.accountable_entity_id,
-    f.accountable_entity_type,
     f.fur_id,
-    f.taxable_amount::DECIMAL(10,2)                                     AS taxable_amount,
+    f.taxable_amount::float                                     AS taxable_amount,
     LOWER(f.flag_based_on_Ua)                                   AS flag
 FROM furlenco_analytics.user_defined_tables.rental_acquition_unified f
     JOIN months m
 ON f.activation_date >= m.m_start
-    AND f.activation_date <=  m.m_end
+    AND f.activation_date <  m.m_end
 WHERE LOWER(f.flag_based_on_Ua) IN ('new', 'upsell')
     )
 
 -- Components 4+5: New Deliveries + Upsells — single pass
     , acquisition_components AS (
 SELECT month_num,
-    COUNT(DISTINCT CASE WHEN flag = 'new' THEN CONCAT(accountable_entity_type, '::', accountable_entity_id) END)    AS nd_items,
+    COUNT(DISTINCT CASE WHEN flag = 'new' THEN accountable_entity_id END)    AS nd_items,
     COUNT(DISTINCT CASE WHEN flag = 'new' THEN fur_id END)                   AS nd_cx,
     SUM(CASE WHEN flag = 'new' THEN taxable_amount ELSE 0 END)              AS nd_rev,
-    COUNT(DISTINCT CASE WHEN flag = 'upsell' THEN CONCAT(accountable_entity_type, '::', accountable_entity_id) END) AS us_items,
+    COUNT(DISTINCT CASE WHEN flag = 'upsell' THEN accountable_entity_id END) AS us_items,
     COUNT(DISTINCT CASE WHEN flag = 'upsell' THEN fur_id END)                AS us_cx,
     SUM(CASE WHEN flag = 'upsell' THEN taxable_amount ELSE 0 END)           AS us_rev
 FROM acquisition_joined
@@ -300,13 +262,13 @@ SELECT /*+ BROADCAST(m) */
     cp.entity_id,
     cp.entity_type,
     cp.user_ids,
-    cp.taxable_amount::DECIMAL(10,2)                                                     AS taxable_amount,
+    cp.taxable_amount::FLOAT                                                     AS taxable_amount,
     cp.churn_flag,
     cp.transaction_type
 FROM churn_pickups_base cp
     JOIN months m
 ON cp.payment_date >= m.m_start
-    AND cp.payment_date <=  m.m_end
+    AND cp.payment_date <  m.m_end
     )
 
 -- Components 6-11: Churn + TTO — single pass over churn_joined
@@ -406,11 +368,11 @@ SELECT /*+ BROADCAST(m) */
     12                                                                           AS sort_order,
     -COUNT(DISTINCT CONCAT(sb.entity_type, '::', sb.entity_id))                  AS items_count,
     0                                                                            AS cx_count,
-    -SUM(COALESCE(sb.taxable_amount::DECIMAL(10,2), 0))                                  AS taxable_revenue
+    -SUM(COALESCE(sb.taxable_amount::FLOAT, 0))                                  AS taxable_revenue
 FROM swap_unified sb
     JOIN months m
 ON sb.fulfillment_date >= m.m_start
-    AND sb.fulfillment_date <=  m.m_end
+    AND sb.fulfillment_date <  m.m_end
 WHERE sb.action = 'SWAP_OUT' AND sb.rnk_desc = 1
 GROUP BY m.month_num
     )
@@ -423,11 +385,11 @@ SELECT /*+ BROADCAST(m) */
     13                                                                           AS sort_order,
     COUNT(DISTINCT CONCAT(sb.entity_type, '::', sb.entity_id))                   AS items_count,
     0                                                                            AS cx_count,
-    SUM(COALESCE(sb.taxable_amount::DECIMAL(10,2), 0))                                   AS taxable_revenue
+    SUM(COALESCE(sb.taxable_amount::FLOAT, 0))                                   AS taxable_revenue
 FROM swap_unified sb
     JOIN months m
 ON sb.fulfillment_date >= m.m_start
-    AND sb.fulfillment_date <=  m.m_end
+    AND sb.fulfillment_date <  m.m_end
 WHERE sb.action = 'SWAP_IN' AND sb.rnk_asc = 1
 GROUP BY m.month_num
     )
@@ -441,13 +403,13 @@ SELECT /*+ BROADCAST(m) */
     15                                       AS sort_order,
     COUNT(DISTINCT product_entity_id)         AS items_count,
     COUNT(DISTINCT pl.user_id)                AS cx_count,
-    SUM(rb.monetary_components_taxableAmount::DECIMAL(18,2)) AS taxable_revenue
+    SUM(CAST(rb.monetary_components_taxableAmount AS DOUBLE)) AS taxable_revenue
 FROM rr_penalty rb
     JOIN furlenco_silver.order_management_systems_evolve.penalty pl
 ON rb.accountable_entity_id = pl.id
     JOIN months m
     ON rb.recognised_at_ist >= m.m_start
-    AND rb.recognised_at_ist <=  m.m_end
+    AND rb.recognised_at_ist <  m.m_end
 GROUP BY m.month_num
     )
 
@@ -484,7 +446,7 @@ SELECT
     rc.created_at, m.month_num
 FROM tenure_windowed rc
     LEFT JOIN sms_entity se ON se.id = rc.accountable_entity_id AND se.entity_type = rc.accountable_entity_type
-    JOIN months m ON rc.start_date >= m.m_start AND rc.start_date <= m.m_end
+    JOIN months m ON rc.start_date >= m.m_start AND rc.start_date < m.m_end
 WHERE rc.previous_recognition_type IS NOT NULL
   AND rc.previous_recognition_type <> rc.revenue_recognition_type
   AND (rc.revenue_recognition_type = 'ACCRUAL' OR rc.previous_recognition_type = 'ACCRUAL')
@@ -530,7 +492,7 @@ FROM rr_item_attach rb
     from_json(CAST(rb.monetary_components_discounts AS STRING),
     'array<struct<amount:double,catalogReferenceId:string,code:string>>')
     ) AS d
-
+WHERE rb.created_at >= '2024-06-01'
     )
 
 -- Single scan of godfather discounts to classify UPFRONT vs non-UPFRONT
@@ -654,7 +616,7 @@ SELECT
     SUM(dp.total_discount_amount)                                                             AS taxable_revenue
 FROM discount_per_cycle dp
     LEFT JOIN sms_entity se ON se.id = dp.accountable_entity_id AND se.entity_type = dp.accountable_entity_type
-    JOIN months m ON dp.start_date >= m.m_start AND dp.start_date <= m.m_end
+    JOIN months m ON dp.start_date >= m.m_start AND dp.start_date < m.m_end
 GROUP BY m.month_num
     )
 
@@ -673,7 +635,7 @@ GROUP BY month_num
 -- ----------------------------------------------------------------------------
         , vas_detail AS (
 SELECT /*+ BROADCAST(m) */
-    rb.accountable_entity_id, rb.accountable_entity_type, rb.external_reference_id,
+    rb.accountable_entity_id, rb.external_reference_id,
     rb.rr_start_date AS start_date, rb.rr_end_date AS end_date, rb.recognised_at,
     CAST(rb.monetary_components_taxableAmount AS DOUBLE) AS taxable_amount,
     vas.entity_id, vas.entity_type, vas.type AS vas_type, vas.user_id,
@@ -687,7 +649,7 @@ SELECT /*+ BROADCAST(m) */
 FROM rr_vas rb
     INNER JOIN months m
 ON DATE(rb.rr_start_date) >= m.m_start
-    AND DATE(rb.rr_start_date) <=  m.m_end
+    AND DATE(rb.rr_start_date) <  m.m_end
     LEFT JOIN (
     SELECT vas.*, se.user_id, se.user_details_displayId
     FROM furlenco_silver.order_management_systems_evolve.Value_Added_Services AS vas
@@ -708,7 +670,7 @@ SELECT
     END                                                                  AS sort_order,
     COUNT(DISTINCT accountable_entity_id)                                AS items_count,
     COUNT(DISTINCT user_id)                                              AS cx_count,
-    SUM(taxable_amount::DECIMAL(10,2))                                                  AS taxable_revenue
+    SUM(taxable_amount::float)                                                  AS taxable_revenue
 FROM vas_detail
 GROUP BY month_num, vas_category
     )
@@ -914,4 +876,3 @@ SELECT
     ROUND(m2_rev, 2)   AS `Month2 Taxable revenue (without VAS)`
 FROM with_calculated
 ORDER BY sort_order;
-

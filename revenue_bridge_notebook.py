@@ -19,6 +19,8 @@
 
 MONTH1_START = "2026-01-01"   # Format: YYYY-MM-DD (first day of Month 1)
 MONTH2_START = "2026-02-01"   # Format: YYYY-MM-DD (first day of Month 2)
+DISCOUNT_LAG_LOOKBACK_MONTHS = 6  # Prior cycles retained for discount/plan-transition LAG.
+LOG_ROW_COUNTS = False            # True adds full count() scans after materialization.
 
 print(f"Month 1 start : {MONTH1_START}")
 print(f"Month 2 start : {MONTH2_START}")
@@ -40,9 +42,16 @@ TMP_RR  = f"{TMP_SCHEMA}.rr_base_{RUN_ID}"
 TMP_FR  = f"{TMP_SCHEMA}.furbooks_revenue_{RUN_ID}"
 TMP_FC  = f"{TMP_SCHEMA}.furbooks_classified_{RUN_ID}"
 TMP_DE  = f"{TMP_SCHEMA}.discounts_exploded_{RUN_ID}"
+TMP_DPC = f"{TMP_SCHEMA}.discount_per_cycle_{RUN_ID}"
 TMP_BW  = f"{TMP_SCHEMA}.base_wide_{RUN_ID}"
 
 print(f"Temp tables will use suffix: {RUN_ID}")
+
+def log_materialized(name, table_name):
+    if LOG_ROW_COUNTS:
+        print(f"{name} materialized: {spark.table(table_name).count():,} rows")
+    else:
+        print(f"{name} materialized")
 
 # COMMAND ----------
 # =============================================================================
@@ -62,7 +71,7 @@ sms_entity_df = spark.sql("""
 """)
 sms_entity_df.write.format("delta").mode("overwrite").saveAsTable(TMP_SMS)
 spark.sql(f"CREATE OR REPLACE TEMP VIEW sms_entity AS SELECT * FROM {TMP_SMS}")
-print(f"sms_entity materialized: {spark.table(TMP_SMS).count():,} rows")
+log_materialized("sms_entity", TMP_SMS)
 
 # COMMAND ----------
 # =============================================================================
@@ -105,7 +114,7 @@ rr_base_df = spark.sql("""
 """)
 rr_base_df.write.format("delta").mode("overwrite").saveAsTable(TMP_RR)
 spark.sql(f"CREATE OR REPLACE TEMP VIEW rr_base AS SELECT * FROM {TMP_RR}")
-print(f"rr_base materialized: {spark.table(TMP_RR).count():,} rows")
+log_materialized("rr_base", TMP_RR)
 
 # COMMAND ----------
 # =============================================================================
@@ -149,7 +158,7 @@ furbooks_revenue_df = spark.sql("""
 furbooks_revenue_df.write.format("delta").mode("overwrite").saveAsTable(TMP_FR)
 spark.sql(f"CREATE OR REPLACE TEMP VIEW furbooks_revenue AS SELECT * FROM {TMP_FR}")
 print(f"months registered (2 rows)")
-print(f"furbooks_revenue materialized: {spark.table(TMP_FR).count():,} rows")
+log_materialized("furbooks_revenue", TMP_FR)
 
 # COMMAND ----------
 # =============================================================================
@@ -219,7 +228,7 @@ furbooks_classified_df = spark.sql("""
 """)
 furbooks_classified_df.write.format("delta").mode("overwrite").saveAsTable(TMP_FC)
 spark.sql(f"CREATE OR REPLACE TEMP VIEW furbooks_classified AS SELECT * FROM {TMP_FC}")
-print(f"furbooks_classified materialized: {spark.table(TMP_FC).count():,} rows")
+log_materialized("furbooks_classified", TMP_FC)
 
 # Components 1, 2, 14 — single pass over cached furbooks_classified
 spark.sql("""
@@ -339,43 +348,40 @@ print("churn_pickups_base, churn_joined, churn_components registered")
 # COMMAND ----------
 # =============================================================================
 # CELL 8 — STAGE 6: Acquisition (new deliveries + upsells)
+# Aggregate both flags in one pass to avoid scanning the acquisition table twice.
 # =============================================================================
 
 spark.sql(f"""
-    SELECT /*+ BROADCAST(m) */
-        m.month_num,
-        f.accountable_entity_id,
-        f.fur_id,
-        CAST(f.taxable_amount AS FLOAT) AS taxable_amount,
-        LOWER(f.flag_based_on_Ua)       AS flag
-    FROM furlenco_analytics.user_defined_tables.rental_acquition_unified f
-    JOIN months m
-        ON f.activation_date >= m.m_start
-        AND f.activation_date <  m.m_end
-    WHERE LOWER(f.flag_based_on_Ua) IN ('new', 'upsell')
-""").createOrReplaceTempView("acquisition_joined")
-
-spark.sql("""
-    SELECT month_num,
-        'New deliveries (Addition of Cx)'     AS component, 4 AS sort_order,
+    SELECT
+        month_num,
+        CASE flag
+            WHEN 'new'    THEN 'New deliveries (Addition of Cx)'
+            WHEN 'upsell' THEN 'Upsell (Addition in item count)'
+        END AS component,
+        CASE flag
+            WHEN 'new'    THEN 4
+            WHEN 'upsell' THEN 5
+        END AS sort_order,
         COUNT(DISTINCT accountable_entity_id) AS items_count,
         COUNT(DISTINCT fur_id)                AS cx_count,
         SUM(taxable_amount)                   AS taxable_revenue
-    FROM acquisition_joined WHERE flag = 'new'
-    GROUP BY month_num
-""").createOrReplaceTempView("new_deliveries")
+    FROM (
+        SELECT /*+ BROADCAST(m) */
+            m.month_num,
+            f.accountable_entity_id,
+            f.fur_id,
+            CAST(f.taxable_amount AS FLOAT) AS taxable_amount,
+            LOWER(f.flag_based_on_Ua)       AS flag
+        FROM furlenco_analytics.user_defined_tables.rental_acquition_unified f
+        JOIN months m
+            ON f.activation_date >= m.m_start
+            AND f.activation_date <  m.m_end
+        WHERE LOWER(f.flag_based_on_Ua) IN ('new', 'upsell')
+    )
+    GROUP BY month_num, flag
+""").createOrReplaceTempView("acquisition_components")
 
-spark.sql("""
-    SELECT month_num,
-        'Upsell (Addition in item count)'     AS component, 5 AS sort_order,
-        COUNT(DISTINCT accountable_entity_id) AS items_count,
-        COUNT(DISTINCT fur_id)                AS cx_count,
-        SUM(taxable_amount)                   AS taxable_revenue
-    FROM acquisition_joined WHERE flag = 'upsell'
-    GROUP BY month_num
-""").createOrReplaceTempView("upsells")
-
-print("new_deliveries, upsells registered")
+print("acquisition_components registered")
 
 # COMMAND ----------
 # =============================================================================
@@ -385,26 +391,48 @@ print("new_deliveries, upsells registered")
 # =============================================================================
 
 spark.sql(f"""
-    SELECT attachment_id AS entity_id, 'ATTACHMENT' AS entity_type, action, fulfillment_date
-    FROM furlenco_silver.order_management_systems_evolve.swap_attachments
-    WHERE state = 'FULFILLED' AND fulfillment_date IS NOT NULL AND action IN ('SWAP_OUT', 'SWAP_IN')
-      AND fulfillment_date >= DATE_ADD(CAST('{MONTH1_START}' AS DATE), -60)
+    SELECT
+        sa.attachment_id AS entity_id,
+        'ATTACHMENT' AS entity_type,
+        sa.action,
+        DATE(sa.fulfillment_date + INTERVAL '330 minutes') AS fulfillment_date,
+        m.month_num
+    FROM furlenco_silver.order_management_systems_evolve.swap_attachments sa
+    JOIN months m
+        ON DATE(sa.fulfillment_date + INTERVAL '330 minutes') >= m.m_start
+        AND DATE(sa.fulfillment_date + INTERVAL '330 minutes') <  m.m_end
+    WHERE sa.state = 'FULFILLED'
+      AND sa.fulfillment_date IS NOT NULL
+      AND sa.action IN ('SWAP_OUT', 'SWAP_IN')
+      AND sa.fulfillment_date >= DATE_ADD(CAST('{MONTH1_START}' AS DATE), -1)
+      AND sa.fulfillment_date <  ADD_MONTHS(CAST('{MONTH2_START}' AS DATE), 1)
     UNION ALL
-    SELECT item_id AS entity_id, 'ITEM' AS entity_type, action, fulfillment_date
-    FROM furlenco_silver.order_management_systems_evolve.swap_items
-    WHERE state = 'FULFILLED' AND fulfillment_date IS NOT NULL AND action IN ('SWAP_OUT', 'SWAP_IN')
-      AND fulfillment_date >= DATE_ADD(CAST('{MONTH1_START}' AS DATE), -60)
+    SELECT
+        si.item_id AS entity_id,
+        'ITEM' AS entity_type,
+        si.action,
+        DATE(si.fulfillment_date + INTERVAL '330 minutes') AS fulfillment_date,
+        m.month_num
+    FROM furlenco_silver.order_management_systems_evolve.swap_items si
+    JOIN months m
+        ON DATE(si.fulfillment_date + INTERVAL '330 minutes') >= m.m_start
+        AND DATE(si.fulfillment_date + INTERVAL '330 minutes') <  m.m_end
+    WHERE si.state = 'FULFILLED'
+      AND si.fulfillment_date IS NOT NULL
+      AND si.action IN ('SWAP_OUT', 'SWAP_IN')
+      AND si.fulfillment_date >= DATE_ADD(CAST('{MONTH1_START}' AS DATE), -1)
+      AND si.fulfillment_date <  ADD_MONTHS(CAST('{MONTH2_START}' AS DATE), 1)
 """).createOrReplaceTempView("swap_entities")
 
 # Swap-out: pick the most recent RR cycle before swap date
 spark.sql("""
     SELECT
-        sw.entity_id, sw.entity_type,
+        sw.entity_id, sw.entity_type, sw.month_num,
         se.user_id,
-        DATE(sw.fulfillment_date + INTERVAL '330 minutes') AS fulfillment_date,
+        sw.fulfillment_date,
         rb.monetary_components_taxableAmount               AS taxable_amount,
         ROW_NUMBER() OVER (
-            PARTITION BY sw.entity_id, sw.entity_type
+            PARTITION BY sw.entity_id, sw.entity_type, sw.fulfillment_date
             ORDER BY rb.rr_start_date DESC
         ) AS rr_rnk
     FROM swap_entities sw
@@ -415,34 +443,31 @@ spark.sql("""
         ON  rb.accountable_entity_id   = sw.entity_id
         AND rb.accountable_entity_type = sw.entity_type
         AND rb.accountable_entity_type IN ('ITEM', 'ATTACHMENT')
-        AND rb.rr_start_date          <= DATE(sw.fulfillment_date + INTERVAL '330 minutes')
+        AND rb.rr_start_date          <= sw.fulfillment_date
     WHERE sw.action = 'SWAP_OUT'
 """).createOrReplaceTempView("swap_base")
 
 spark.sql("""
-    SELECT /*+ BROADCAST(m) */
-        m.month_num,
+    SELECT
+        sb.month_num,
         'Swapped out' AS component, 12 AS sort_order,
         -COUNT(DISTINCT CONCAT(sb.entity_type, '::', sb.entity_id)) AS items_count,
         0                                                            AS cx_count,
         -SUM(CAST(sb.taxable_amount AS FLOAT))                       AS taxable_revenue
     FROM swap_base sb
-    JOIN months m
-        ON sb.fulfillment_date >= m.m_start
-        AND sb.fulfillment_date <  m.m_end
     WHERE sb.rr_rnk = 1
-    GROUP BY m.month_num
+    GROUP BY sb.month_num
 """).createOrReplaceTempView("swapped_out")
 
 # Swap-in: pick the first RR cycle on or after swap date
 spark.sql("""
     SELECT
-        sw.entity_id, sw.entity_type,
+        sw.entity_id, sw.entity_type, sw.month_num,
         se.user_id,
-        DATE(sw.fulfillment_date + INTERVAL '330 minutes') AS fulfillment_date,
+        sw.fulfillment_date,
         rb.monetary_components_taxableAmount               AS taxable_amount,
         ROW_NUMBER() OVER (
-            PARTITION BY sw.entity_id, sw.entity_type
+            PARTITION BY sw.entity_id, sw.entity_type, sw.fulfillment_date
             ORDER BY rb.rr_start_date ASC
         ) AS rr_rnk
     FROM swap_entities sw
@@ -453,23 +478,20 @@ spark.sql("""
         ON  rb.accountable_entity_id   = sw.entity_id
         AND rb.accountable_entity_type = sw.entity_type
         AND rb.accountable_entity_type IN ('ITEM', 'ATTACHMENT')
-        AND rb.rr_start_date          >= DATE(sw.fulfillment_date + INTERVAL '330 minutes')
+        AND rb.rr_start_date          >= sw.fulfillment_date
     WHERE sw.action = 'SWAP_IN'
 """).createOrReplaceTempView("swap_in_base")
 
 spark.sql("""
-    SELECT /*+ BROADCAST(m) */
-        m.month_num,
+    SELECT
+        sb.month_num,
         'Swapped in' AS component, 13 AS sort_order,
         COUNT(DISTINCT CONCAT(sb.entity_type, '::', sb.entity_id)) AS items_count,
         0                                                           AS cx_count,
         SUM(CAST(sb.taxable_amount AS FLOAT))                       AS taxable_revenue
     FROM swap_in_base sb
-    JOIN months m
-        ON sb.fulfillment_date >= m.m_start
-        AND sb.fulfillment_date <  m.m_end
     WHERE sb.rr_rnk = 1
-    GROUP BY m.month_num
+    GROUP BY sb.month_num
 """).createOrReplaceTempView("swapped_in")
 
 print("swap_entities, swap_base, swapped_out, swap_in_base, swapped_in registered")
@@ -569,7 +591,7 @@ print("tenure_windowed, customer_accrual_changes, accrual_components registered"
 # Referenced by both plan_transition and discount paths — registered once here.
 # =============================================================================
 
-discounts_exploded_df = spark.sql("""
+discounts_exploded_df = spark.sql(f"""
     SELECT
         rb.accountable_entity_id,
         rb.accountable_entity_type,
@@ -589,6 +611,8 @@ discounts_exploded_df = spark.sql("""
     ) AS d
     WHERE rb.accountable_entity_type IN ('ITEM', 'ATTACHMENT')
       AND rb.created_at >= '2024-06-01'
+      AND rb.rr_start_date >= ADD_MONTHS(CAST('{MONTH1_START}' AS DATE), -{DISCOUNT_LAG_LOOKBACK_MONTHS})
+      AND rb.rr_start_date <  ADD_MONTHS(CAST('{MONTH2_START}' AS DATE),  1)
 """)
 discounts_exploded_df.write.format("delta").mode("overwrite").saveAsTable(TMP_DE)
 spark.sql(f"CREATE OR REPLACE TEMP VIEW discounts_exploded AS SELECT * FROM {TMP_DE}")
@@ -659,8 +683,7 @@ print("discounts_exploded, plan_transition registered")
 # CELL 13 — STAGE 11: Discount changes + VAS
 # =============================================================================
 
-# Discount change
-spark.sql("""
+discount_per_cycle_df = spark.sql("""
     SELECT
         e.accountable_entity_id, e.accountable_entity_type,
         e.rr_start_date AS start_date, e.rr_end_date AS end_date,
@@ -669,7 +692,10 @@ spark.sql("""
     LEFT JOIN furlenco_silver.godfather_evolve.discounts gd ON e.catalogReferenceId = gd.id
     WHERE gd.type IS NULL OR gd.type <> 'UPFRONT'
     GROUP BY e.accountable_entity_id, e.accountable_entity_type, e.rr_start_date, e.rr_end_date
-""").createOrReplaceTempView("discount_per_cycle")
+""")
+discount_per_cycle_df.write.format("delta").mode("overwrite").saveAsTable(TMP_DPC)
+spark.sql(f"CREATE OR REPLACE TEMP VIEW discount_per_cycle AS SELECT * FROM {TMP_DPC}")
+log_materialized("discount_per_cycle", TMP_DPC)
 
 spark.sql("""
     SELECT
@@ -779,8 +805,7 @@ spark.sql("""
     SELECT month_num, 'Opening_revenue' AS component, 1 AS sort_order, op_items AS items_count, op_cx AS cx_count, op_rev AS taxable_revenue FROM classified_components
     UNION ALL SELECT month_num, 'Minimum tenure charges', 2, mtp_adj_items, mtp_adj_cx, mtp_adj_rev FROM classified_components
     UNION ALL SELECT month_num, 'Current month MTP', 14, cmtp_items, cmtp_cx, cmtp_rev FROM classified_components
-    UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM new_deliveries
-    UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM upsells
+    UNION ALL SELECT month_num, component, sort_order, items_count, cx_count, taxable_revenue FROM acquisition_components
     UNION ALL SELECT month_num, 'Total pickup (Return Request Date)',        6,  tp_items,    tp_cx,    tp_rev    FROM churn_components
     UNION ALL SELECT month_num, 'Partial pickup (Reduction in item count)',  7,  pp_items,    0,        pp_rev    FROM churn_components
     UNION ALL SELECT month_num, 'Full pickup (Reduction of Cx)',             8,  fp_items,    fp_cx,    fp_rev    FROM churn_components
@@ -812,7 +837,7 @@ base_wide_df = spark.sql("""
 """)
 base_wide_df.write.format("delta").mode("overwrite").saveAsTable(TMP_BW)
 spark.sql(f"CREATE OR REPLACE TEMP VIEW base_wide AS SELECT * FROM {TMP_BW}")
-print(f"base_wide materialized: {spark.table(TMP_BW).count():,} rows")
+log_materialized("base_wide", TMP_BW)
 
 # Opening row (Month 2 opening = next month's starting point)
 spark.sql("""
@@ -942,6 +967,6 @@ display(result_df)
 # =============================================================================
 # Cleanup: drop temp Delta tables
 # =============================================================================
-for tbl in [TMP_SMS, TMP_RR, TMP_FR, TMP_FC, TMP_DE, TMP_BW]:
+for tbl in [TMP_SMS, TMP_RR, TMP_FR, TMP_FC, TMP_DE, TMP_DPC, TMP_BW]:
     spark.sql(f"DROP TABLE IF EXISTS {tbl}")
 print("Temp Delta tables dropped")
